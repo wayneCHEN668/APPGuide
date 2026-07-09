@@ -1,0 +1,6 @@
+{
+  "name": "业务系统引导插件开发套件",
+  "description": "一个服务于复杂业务系统的浏览器引导插件开发、测试与模拟套件，支持实时页面焦点解析、URL 匹配、高亮步骤引导和 JSON API 联动。",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

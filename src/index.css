@@ -1,0 +1,68 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap');
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+}
+
+@layer utilities {
+  /* Dynamic custom highlights */
+  @keyframes pulseGlow {
+    0%, 100% {
+      box-shadow: 0 0 0 0px rgba(34, 211, 238, 0.8), 0 0 8px rgba(34, 211, 238, 0.4);
+    }
+    50% {
+      box-shadow: 0 0 0 8px rgba(34, 211, 238, 0), 0 0 15px rgba(34, 211, 238, 0.8);
+    }
+  }
+
+  @keyframes solidGlow {
+    0%, 100% {
+      box-shadow: 0 0 0 2px rgba(239, 68, 68, 0.9), 0 0 10px rgba(239, 68, 68, 0.5);
+    }
+    50% {
+      box-shadow: 0 0 0 5px rgba(239, 68, 68, 0.3), 0 0 15px rgba(239, 68, 68, 0.8);
+    }
+  }
+
+  @keyframes successGlow {
+    0%, 100% {
+      box-shadow: 0 0 0 2px rgba(16, 185, 129, 0.9), 0 0 10px rgba(16, 185, 129, 0.5);
+    }
+    50% {
+      box-shadow: 0 0 0 5px rgba(16, 185, 129, 0.3), 0 0 15px rgba(16, 185, 129, 0.8);
+    }
+  }
+
+  .guide-highlight-pulse {
+    border: 2px solid #22d3ee !important;
+    animation: pulseGlow 1.5s infinite;
+  }
+
+  .guide-highlight-solid {
+    border: 2px solid #ef4444 !important;
+    animation: solidGlow 2s infinite;
+  }
+
+  .guide-highlight-glow {
+    border: 2px dashed #f59e0b !important;
+    box-shadow: 0 0 15px #f59e0b !important;
+  }
+
+  .guide-highlight-success {
+    border: 2px solid #10b981 !important;
+    animation: successGlow 1.5s infinite;
+  }
+
+  /* Immersive glow classes */
+  .glow-cyan-lg {
+    box-shadow: 0 0 25px rgba(34, 211, 238, 0.25);
+  }
+  
+  .glow-cyan-sm {
+    box-shadow: 0 0 10px rgba(34, 211, 238, 0.15);
+  }
+}
+
+
