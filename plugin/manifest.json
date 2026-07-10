@@ -1,0 +1,36 @@
+{
+  "manifest_version": 3,
+  "name": "企业业务流步骤合规引导系统",
+  "version": "1.0.0",
+  "description": "实时解析复杂行业系统中的输入焦点与URL，动态加载对应业务指南，步骤化高亮引导规范操作。",
+  "permissions": [
+    "activeTab",
+    "storage"
+  ],
+  "host_permissions": [
+    "http://localhost:3010/*",
+    "http://81.69.17.148:3010/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "css": ["content.css"]
+    }
+  ],
+  "action": {
+    "default_popup": "popup.html"
+  },
+  "commands": {
+    "toggle-guide": {
+      "suggested_key": {
+        "default": "Alt+G",
+        "mac": "Alt+G"
+      },
+      "description": "呼出/关闭当前业务操作引导流程"
+    }
+  }
+}

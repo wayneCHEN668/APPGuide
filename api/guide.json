@@ -1,0 +1,50 @@
+{
+  "title": "将PPT文件生成助讲智能体",
+  "starturl": "https://zzppt.com",
+  "pages": [
+    {
+      "url": "https://zzppt.com",
+      "title": "将PPT文件生成助讲智能体",
+      "description": "本指南用于辅助上传PPT文件并按设定生成助讲智能体。",
+      "steps": [
+        {
+          "title": "上传PPT文件",
+          "description": "点击页面上的文件上传按钮（拖拽或点击上传的区域），选择想要生成助讲智能体的PPT并上传。",
+          "highlightStyle": "glow"
+        },
+        {
+          "title": "设置演讲角色",
+          "description": "点击「演讲角色」下拉框将其展开，选择不同的演讲角色会使用不同的音色和语调。",
+          "highlightStyle": "glow"
+        },
+        {
+          "title": "设置场景",
+          "description": "点击「场景」下拉框将其展开，根据演讲场合选择合适的场景类型。",
+          "highlightStyle": "pulse"
+        }
+      ]
+    },
+    {
+     "url": "https://zzppt.com/word",
+    "title": "将PPT文件生成助讲智能体",
+    "description": "本指南用于辅助上传PPT文件并按设定生成助讲智能体。",
+    "steps": [
+        {
+          "title": "设置讲稿篇幅",
+          "description": "点击「讲稿篇幅」下拉框将其展开，选择简短、适中或详细等不同的篇幅长度。",
+          "highlightStyle": "pulse"
+        },
+        {
+          "title": "设置语种",
+          "description": "点击「语种」下拉框将其展开，选择生成讲稿所使用的语言。",
+          "highlightStyle": "glow"
+        },
+        {
+          "title": "提交任务",
+          "description": "确认页面上已显示上传的文件名，然后点击「创建任务」按钮提交生成请求。",
+          "highlightStyle": "pulse"
+        }
+      ]
+    }
+  ]
+}

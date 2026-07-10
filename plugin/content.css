@@ -1,0 +1,198 @@
+/* ------------------ 动态引导悬浮窗气泡 ------------------ */
+.guide-extension-bubble {
+  position: absolute;
+  z-index: 10000000;
+  width: 320px;
+  background-color: #0f172a !important;
+  border: 1px solid rgba(59, 130, 246, 0.4) !important;
+  border-radius: 12px !important;
+  box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.5), 0 10px 10px -5px rgba(0, 0, 0, 0.4) !important;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif !important;
+  color: #f1f5f9 !important;
+  overflow: hidden;
+  transition: opacity 0.2s ease-in-out;
+}
+
+.guide-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px;
+  background-color: #020617 !important;
+  border-bottom: 1px solid #1e293b !important;
+}
+
+.guide-header span {
+  font-size: 11px !important;
+  font-weight: 700 !important;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: #94a3b8 !important;
+}
+
+.guide-btn-close {
+  background: none !important;
+  border: none !important;
+  color: #64748b !important;
+  font-size: 18px !important;
+  cursor: pointer !important;
+  line-height: 1 !important;
+  padding: 0 !important;
+}
+
+.guide-btn-close:hover {
+  color: #f1f5f9 !important;
+}
+
+.guide-body {
+  padding: 14px !important;
+}
+
+.guide-step-title {
+  margin: 0 0 6px 0 !important;
+  font-size: 14px !important;
+  font-weight: 700 !important;
+  color: #ffffff !important;
+  display: flex;
+  align-items: center;
+}
+
+.guide-step-num {
+  font-size: 10px !important;
+  font-family: monospace !important;
+  background-color: #1e1b4b !important;
+  border: 1px solid rgba(99, 102, 241, 0.4) !important;
+  color: #818cf8 !important;
+  padding: 2px 6px !important;
+  border-radius: 4px !important;
+  margin-right: 8px !important;
+  font-weight: bold !important;
+}
+
+.guide-step-desc {
+  margin: 0 !important;
+  font-size: 12px !important;
+  line-height: 1.5 !important;
+  color: #cbd5e1 !important;
+}
+
+.guide-meta {
+  margin-top: 10px !important;
+  font-size: 10px !important;
+  font-family: monospace !important;
+  color: #475569 !important;
+}
+
+.guide-meta code {
+  color: #94a3b8 !important;
+}
+
+.guide-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px !important;
+  background-color: #020617/50 !important;
+  border-top: 1px solid #1e293b !important;
+}
+
+.guide-progress {
+  font-size: 10px !important;
+  font-family: monospace !important;
+  color: #64748b !important;
+}
+
+.guide-actions {
+  display: flex;
+  gap: 6px !important;
+}
+
+.guide-btn-nav, .guide-btn-primary {
+  padding: 4px 10px !important;
+  font-size: 11px !important;
+  font-weight: 600 !important;
+  border-radius: 6px !important;
+  cursor: pointer !important;
+  border: none !important;
+  transition: all 0.15s ease !important;
+}
+
+.guide-btn-nav {
+  background-color: #1e293b !important;
+  color: #cbd5e1 !important;
+  border: 1px solid #334155 !important;
+}
+
+.guide-btn-nav:hover:not(:disabled) {
+  background-color: #334155 !important;
+  color: #f1f5f9 !important;
+}
+
+.guide-btn-nav:disabled {
+  opacity: 0.3 !important;
+  cursor: not-allowed !important;
+}
+
+.guide-btn-primary {
+  background-color: #2563eb !important;
+  color: #ffffff !important;
+}
+
+.guide-btn-primary:hover {
+  background-color: #3b82f6 !important;
+}
+
+/* ------------------ 高亮遮罩覆盖层 ------------------ */
+.guide-extension-highlight {
+  position: absolute;
+  pointer-events: none;
+  z-index: 9999999;
+  border-radius: 6px;
+  transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+@keyframes extensionPulse {
+  0%, 100% { box-shadow: 0 0 0 0px rgba(59, 130, 246, 0.7); }
+  50% { box-shadow: 0 0 0 8px rgba(59, 130, 246, 0); }
+}
+@keyframes extensionSolid {
+  0%, 100% { box-shadow: 0 0 0 2px rgba(239, 68, 68, 0.8); }
+  50% { box-shadow: 0 0 0 4px rgba(239, 68, 68, 0.4); }
+}
+
+.guide-style-pulse {
+  border: 2px solid #3b82f6 !important;
+  animation: extensionPulse 1.5s infinite;
+}
+
+.guide-style-solid {
+  border: 2px solid #ef4444 !important;
+  animation: extensionSolid 2s infinite;
+}
+
+.guide-style-glow {
+  border: 2px dashed #f59e0b !important;
+  box-shadow: 0 0 15px #f59e0b !important;
+}
+
+/* ------------------ 通知小吐司 ------------------ */
+.guide-extension-toast {
+  position: fixed;
+  bottom: -60px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 10000001;
+  background-color: #1e293b;
+  border: 1px solid #3b82f6;
+  color: #ffffff;
+  padding: 10px 20px;
+  border-radius: 10px;
+  font-size: 12px;
+  font-weight: 500;
+  box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.3);
+  transition: bottom 0.3s cubic-bezier(0.18, 0.89, 0.32, 1.28);
+}
+
+.guide-extension-toast.show {
+  bottom: 30px;
+}

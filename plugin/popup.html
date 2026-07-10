@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <style>
+    body {
+      width: 280px;
+      padding: 14px;
+      background-color: #0f172a;
+      color: #f1f5f9;
+      font-family: system-ui, -apple-system, sans-serif;
+      margin: 0;
+    }
+    .title {
+      font-size: 14px;
+      font-weight: bold;
+      color: #22d3ee;
+      margin-bottom: 4px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .desc {
+      font-size: 11px;
+      color: #94a3b8;
+      line-height: 1.4;
+      margin-bottom: 12px;
+    }
+    .divider {
+      height: 1px;
+      background-color: #1e293b;
+      margin: 10px 0;
+    }
+    .form-group {
+      margin-bottom: 12px;
+    }
+    label {
+      font-size: 10px;
+      color: #94a3b8;
+      font-weight: bold;
+      display: block;
+      margin-bottom: 4px;
+      text-transform: uppercase;
+    }
+    input {
+      width: 100%;
+      background-color: #020617;
+      border: 1px solid #334155;
+      border-radius: 6px;
+      color: #f1f5f9;
+      padding: 6px 8px;
+      font-size: 11px;
+      box-sizing: border-box;
+    }
+    input:focus {
+      outline: none;
+      border-color: #22d3ee;
+    }
+    .btn-save {
+      background-color: #0891b2;
+      color: #ffffff;
+      border: none;
+      border-radius: 6px;
+      padding: 6px 12px;
+      font-size: 11px;
+      font-weight: bold;
+      cursor: pointer;
+      width: 100%;
+      transition: background-color 0.15s;
+    }
+    .btn-save:hover {
+      background-color: #06b6d4;
+    }
+    .shortcut-badge {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      background-color: #020617;
+      padding: 6px 10px;
+      border-radius: 6px;
+      font-size: 10px;
+      border: 1px solid #1e293b;
+    }
+    .key {
+      font-family: monospace;
+      font-weight: bold;
+      color: #f59e0b;
+      background-color: #1e1b4b;
+      padding: 2px 6px;
+      border-radius: 4px;
+    }
+    .status-text {
+      font-size: 10px;
+      color: #10b981;
+      margin-top: 4px;
+      display: none;
+      text-align: center;
+    }
+  </style>
+</head>
+<body>
+  <div class="title">业务合规引导助手</div>
+  <div class="desc">在任何企业级后台系统界面，加载本插件后配合快捷键即可拉取特定步骤引导。</div>
+  
+  <div class="divider"></div>
+  
+  <div class="form-group">
+    <label for="apiUrl">引导配置 API 端点 (Server URL)</label>
+    <input type="text" id="apiUrl" placeholder="例如: http://localhost:3000" />
+    <div id="status" class="status-text">✓ 配置保存成功，请刷新目标页面</div>
+  </div>
+  
+  <button id="saveBtn" class="btn-save">保存配置</button>
+
+  <div class="divider"></div>
+
+  <div class="shortcut-badge">
+    <span>快捷呼出按键</span>
+    <span class="key">Alt + G</span>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
