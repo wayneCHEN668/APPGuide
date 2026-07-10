@@ -30,19 +30,14 @@
     "description": "本指南用于辅助上传PPT文件并按设定生成助讲智能体。",
     "steps": [
         {
-          "title": "设置讲稿篇幅",
-          "description": "点击「讲稿篇幅」下拉框将其展开，选择简短、适中或详细等不同的篇幅长度。",
+          "title": "浏览语料库",
+          "description": "点击「语料库」在右侧单击添加，选择合适的语料库。",
           "highlightStyle": "pulse"
         },
         {
-          "title": "设置语种",
-          "description": "点击「语种」下拉框将其展开，选择生成讲稿所使用的语言。",
+          "title": "浏览会员中心",
+          "description": "点击「会员中心」将其展开，选择合适的会员等级。",
           "highlightStyle": "glow"
-        },
-        {
-          "title": "提交任务",
-          "description": "确认页面上已显示上传的文件名，然后点击「创建任务」按钮提交生成请求。",
-          "highlightStyle": "pulse"
         }
       ]
     }
