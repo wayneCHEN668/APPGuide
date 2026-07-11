@@ -27,12 +27,17 @@ chrome.commands.onCommand.addListener((command) => {
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.action === "fetch-guide") {
     const cleanPath = message.url;
+    const flowId = message.flowId || "";
 
     chrome.storage.local.get(["apiBaseUrl"], (result) => {
       const apiBaseUrl = result.apiBaseUrl || "81.69.17.148:3010";
       // 自动补全 http:// 协议前缀
       const baseUrl = /^https?:\/\//i.test(apiBaseUrl) ? apiBaseUrl : `http://${apiBaseUrl}`;
-      const fetchUrl = `${baseUrl}/api/guide?url=${encodeURIComponent(cleanPath)}`;
+      let fetchUrl = `${baseUrl}/api/guide?url=${encodeURIComponent(cleanPath)}`;
+      if (flowId) {
+        // 携带正在进行中的流程id，供服务端优先在该流程内匹配当前页（跨页续接）
+        fetchUrl += `&flowId=${encodeURIComponent(flowId)}`;
+      }
 
       console.log("[Background] 代理获取指南:", fetchUrl);
 

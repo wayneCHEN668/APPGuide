@@ -16,15 +16,24 @@
   let activeGuide = null;
   let currentStepIndex = 0;
   let isGuideActive = false;
-  
+
+  // 当前引导所属的跨页流程元信息（单页引导时为null）
+  // { flowId, pageIndex, totalPages, globalStepOffset, totalSteps }
+  let flowMeta = null;
+
   // 气泡 DOM 及高亮层 DOM
   let bubbleElement = null;
   let highlightElement = null;
   let resizeObserver = null;
 
+  // 跨页流程运行时状态：存在 chrome.storage.local，仅记录"进行到哪一步了"，
+  // 不存具体steps内容（那些每次都从API重新拉取，保证内容永远最新）
+  const FLOW_STATE_KEY = "guideFlowState";
+  const FLOW_TTL_MS = 2 * 60 * 60 * 1000; // 2小时不活跃视为放弃
+
   // 注：API 地址由 popup 配置并存储在 chrome.storage，实际 fetch 由 background worker 代理执行
 
-  console.log("[BusinessGuide] 插件内容脚本已成功注入目标系统。支持高级本地语义模糊匹配。");
+  console.log("[BusinessGuide] 插件内容脚本已成功注入目标系统。支持高级本地语义模糊匹配 + 跨页流程续接。");
 
   // 初始化：监听键盘 Alt+G
   window.addEventListener("keydown", (e) => {
@@ -42,6 +51,27 @@
       }
     });
   }
+
+  // ------------------ 跨页流程：被动型自动续接 ------------------
+  // 页面刚加载时（脚本刚被注入），静默检查是否有一个尚未过期的进行中流程，
+  // 如果当前页恰好是该流程的下一页，就自动恢复引导，不需要用户再按一次 Alt+G。
+  // 注意：这里只在 mode==="resume" 时才动作；如果检测结果是 new/choose/not_found
+  // （说明用户此刻打开的页面跟进行中的流程无关），一律保持安静，不弹任何提示，
+  // 也不清空已存的流程状态（万一用户只是临时切走，待会儿还会跳回正确的页面）。
+  (async function autoResumeFlowOnLoad() {
+    const state = await getFlowStateIfValid();
+    if (!state) return;
+
+    try {
+      const data = await fetchGuideFromApi(window.location.pathname, state.flowId);
+      if (data && data.success && data.mode === "resume") {
+        console.log("[BusinessGuide] 检测到进行中的跨页流程，自动续接：", state.flowId);
+        startGuideFromResolved(data, state);
+      }
+    } catch (e) {
+      console.warn("[BusinessGuide] 自动续接检测失败（静默忽略，不打扰用户）:", e);
+    }
+  })();
 
   // ------------------ 客户端本地语义匹配引擎 (Semantic Matcher) ------------------
   
@@ -324,49 +354,190 @@
     }
   }
 
-  // 开启引导并请求 API 决策
+  // 通过 background worker 代理请求 /api/guide，绕过 HTTPS 页面的 Mixed Content 限制。
+  // flowId 传入当前进行中的流程id（没有则不传），供服务端做分支A/B判定。
+  function fetchGuideFromApi(pathname, flowId) {
+    return new Promise((resolve, reject) => {
+      chrome.runtime.sendMessage(
+        { action: "fetch-guide", url: pathname, flowId: flowId || "" },
+        (response) => {
+          if (chrome.runtime.lastError) {
+            reject(new Error(chrome.runtime.lastError.message));
+          } else if (response && response.success) {
+            resolve(response.data);
+          } else {
+            reject(new Error((response && response.error) || "API 请求失败"));
+          }
+        }
+      );
+    });
+  }
+
+  // 读取跨页流程运行时状态，并做TTL过期判断（过期则顺手清空，返回null）
+  function getFlowStateIfValid() {
+    return new Promise((resolve) => {
+      chrome.storage.local.get([FLOW_STATE_KEY], (result) => {
+        const state = result[FLOW_STATE_KEY];
+        if (!state) {
+          resolve(null);
+          return;
+        }
+        if (Date.now() - state.lastActiveAt > FLOW_TTL_MS) {
+          chrome.storage.local.remove(FLOW_STATE_KEY);
+          resolve(null);
+          return;
+        }
+        resolve(state);
+      });
+    });
+  }
+
+  // 记录"接下来应该显示第几步"（globalStepNumber），每次渲染/翻页都要调用
+  function persistFlowState(nextGlobalStepNumber) {
+    if (!flowMeta) return;
+    chrome.storage.local.set({
+      [FLOW_STATE_KEY]: {
+        flowId: flowMeta.flowId,
+        globalStepNumber: nextGlobalStepNumber,
+        lastActiveAt: Date.now(),
+      },
+    });
+  }
+
+  function clearFlowState() {
+    chrome.storage.local.remove(FLOW_STATE_KEY);
+  }
+
+  // 核心功能：开关引导（用户手动按 Alt+G 触发）
   async function enableGuide() {
     const cleanPath = window.location.pathname;
     console.log("[BusinessGuide] 正在检测页面并获取 API 校验...", cleanPath);
 
+    const state = await getFlowStateIfValid();
+
     try {
-      // 通过 background worker 代理请求，绕过 HTTPS 页面的 Mixed Content 限制
-      const data = await new Promise((resolve, reject) => {
-        chrome.runtime.sendMessage(
-          { action: "fetch-guide", url: cleanPath },
-          (response) => {
-            if (chrome.runtime.lastError) {
-              reject(new Error(chrome.runtime.lastError.message));
-            } else if (response && response.success) {
-              resolve(response.data);
-            } else {
-              reject(new Error(response?.error || "API 请求失败"));
-            }
-          }
-        );
-      });
-
-      if (data && data.success && data.guide && data.guide.steps.length > 0) {
-        activeGuide = data.guide;
-        currentStepIndex = 0;
-        isGuideActive = true;
-
-        renderGuideUI();
-        console.log("[BusinessGuide] 成功拉取最新业务流程指南：" + activeGuide.title);
-      } else {
-        showToast("💡 当前页面未配置特定的业务操作指南 API");
-      }
+      const data = await fetchGuideFromApi(cleanPath, state ? state.flowId : null);
+      handleGuideApiResult(data, cleanPath, state, true);
     } catch (e) {
       console.error("[BusinessGuide] 无法连接到 API 配置端点:", e);
       showToast("❌ 业务指南 API 端点连接失败");
     }
   }
 
+  // 统一处理 /api/guide 的四种返回结果：resume / new / choose / not_found(或其它失败)
+  // manual=true 表示这是用户主动触发的（Alt+G 或候选选择），所有结果都要给出UI反馈；
+  // manual=false 表示这是页面加载时的被动自动检测，只在 resume 时才动作，其余情况保持安静。
+  function handleGuideApiResult(data, cleanPath, state, manual) {
+    if (!data) {
+      if (manual) showToast("❌ 业务指南 API 端点连接失败");
+      return;
+    }
+
+    if (data.success && data.mode === "resume") {
+      startGuideFromResolved(data, state);
+      return;
+    }
+
+    if (!manual) return; // 被动检测：非resume结果一律静默忽略
+
+    if (data.success && data.mode === "new") {
+      startGuideFromResolved(data, null);
+      return;
+    }
+    if (data.success && data.mode === "choose") {
+      renderCandidateChooser(data.candidates, cleanPath);
+      return;
+    }
+    if (!data.success && data.reason === "not_found") {
+      showToast("💡 " + (data.message || "当前页面未配置特定的业务操作指南 API"));
+      return;
+    }
+    showToast("❌ 业务指南 API 端点连接失败");
+  }
+
+  // 根据 /api/guide 返回的已解析页面数据，启动/续接引导渲染
+  // resumeState：仅当data.mode==="resume"且是从storage续接来的时候传入，
+  // 用于把之前存的globalStepNumber换算成这一页内的localIndex，从而精确停在原来的步骤上；
+  // 否则（全新流程/用户手动选择流程）一律从这一页第一步开始。
+  function startGuideFromResolved(data, resumeState) {
+    flowMeta = {
+      flowId: data.flowId,
+      pageIndex: data.pageIndex,
+      totalPages: data.totalPages,
+      globalStepOffset: data.globalStepOffset,
+      totalSteps: data.totalSteps,
+    };
+    activeGuide = {
+      title: data.flowTitle,
+      steps: data.page.steps,
+    };
+
+    let startLocalIndex = 0;
+    if (resumeState && typeof resumeState.globalStepNumber === "number") {
+      const idx = resumeState.globalStepNumber - data.globalStepOffset - 1;
+      if (idx >= 0 && idx < activeGuide.steps.length) {
+        startLocalIndex = idx;
+      }
+    }
+
+    currentStepIndex = startLocalIndex;
+    isGuideActive = true;
+    renderGuideUI();
+    persistFlowState(activeGuide.steps[currentStepIndex].globalStepNumber);
+    console.log("[BusinessGuide] 已加载业务流程指南：" + activeGuide.title +
+      `（第${data.pageIndex + 1}/${data.totalPages}页，步骤${activeGuide.steps[currentStepIndex].globalStepNumber}/${data.totalSteps}）`);
+  }
+
+  // 多个流程共享同一起始页时，展示候选列表让用户选择
+  function renderCandidateChooser(candidates, cleanPath) {
+    cleanupUI();
+
+    bubbleElement = document.createElement("div");
+    bubbleElement.className = "guide-extension-bubble";
+    bubbleElement.innerHTML = `
+      <div class="guide-header">
+        <span>🤖 业务合规助手</span>
+        <button id="guide-close-btn" class="guide-btn-close">×</button>
+      </div>
+      <div class="guide-body">
+        <h3 class="guide-step-title">检测到多个可用引导流程</h3>
+        <p class="guide-step-desc">请选择要开始的流程：</p>
+        <div class="guide-candidate-list">
+          ${candidates.map(c => `
+            <button class="guide-candidate-item" data-flow-id="${c.flowId}">
+              <strong>${c.title}</strong>
+              <span>${c.description || ""}</span>
+            </button>
+          `).join("")}
+        </div>
+      </div>
+    `;
+    document.body.appendChild(bubbleElement);
+
+    document.getElementById("guide-close-btn").onclick = disableGuide;
+    bubbleElement.querySelectorAll(".guide-candidate-item").forEach((btn) => {
+      btn.onclick = async () => {
+        const chosenFlowId = btn.getAttribute("data-flow-id");
+        try {
+          const data = await fetchGuideFromApi(cleanPath, chosenFlowId);
+          handleGuideApiResult(data, cleanPath, null, true);
+        } catch (e) {
+          console.error("[BusinessGuide] 选择流程后拉取指南失败:", e);
+          showToast("❌ 业务指南 API 端点连接失败");
+        }
+      };
+    });
+
+    positionBubble(null, "top");
+  }
+
   function disableGuide() {
     isGuideActive = false;
     activeGuide = null;
+    flowMeta = null;
     cleanupUI();
-    console.log("[BusinessGuide] 业务操作引导已关闭。");
+    clearFlowState();
+    console.log("[BusinessGuide] 业务操作引导已关闭，进行中的流程状态已清除。");
   }
 
   // 渲染/重绘 高亮框与浮窗气泡
@@ -450,6 +621,16 @@
       }
     }
 
+    // 进度显示：有跨页flow元信息时用全局步数，兼容没有flowMeta的极端情况（理论上不会发生）
+    const globalNum = step.globalStepNumber || (currentStepIndex + 1);
+    const totalNum = (flowMeta && flowMeta.totalSteps) || activeGuide.steps.length;
+    const isLastStepOnPage = currentStepIndex === activeGuide.steps.length - 1;
+    const isLastPageOfFlow = !flowMeta || flowMeta.pageIndex >= flowMeta.totalPages - 1;
+    let nextBtnLabel = "下一步";
+    if (isLastStepOnPage) {
+      nextBtnLabel = isLastPageOfFlow ? "完成" : "前往下一页";
+    }
+
     bubbleElement = document.createElement("div");
     bubbleElement.className = "guide-extension-bubble";
     
@@ -460,7 +641,7 @@
       </div>
       <div class="guide-body">
         <h3 class="guide-step-title">
-          <span class="guide-step-num">步骤 ${currentStepIndex + 1}</span>
+          <span class="guide-step-num">步骤 ${globalNum}</span>
           ${step.title}
         </h3>
         <p class="guide-step-desc">${step.description}</p>
@@ -473,10 +654,10 @@
         -->
       </div>
       <div class="guide-footer">
-        <span class="guide-progress">进度: ${currentStepIndex + 1} / ${activeGuide.steps.length}</span>
+        <span class="guide-progress">进度: ${globalNum} / ${totalNum}</span>
         <div class="guide-actions">
           <button id="guide-prev-btn" class="guide-btn-nav" ${currentStepIndex === 0 ? "disabled" : ""}>上一步</button>
-          <button id="guide-next-btn" class="guide-btn-primary">${currentStepIndex === activeGuide.steps.length - 1 ? "完成" : "下一步"}</button>
+          <button id="guide-next-btn" class="guide-btn-primary">${nextBtnLabel}</button>
         </div>
       </div>
     `;
@@ -513,14 +694,36 @@
 
     const tRect = target.getBoundingClientRect();
     const bRect = bubbleElement.getBoundingClientRect();
-    
-    let top = 0;
-    let left = 0;
 
     const scrollY = window.scrollY;
     const scrollX = window.scrollX;
+    const viewportWidth = window.innerWidth;
 
-    switch (position) {
+    // 没显式指定 top/bottom/left 时，一律按原有默认行为"right"处理
+    let effectivePosition = (position === "top" || position === "bottom" || position === "left")
+      ? position
+      : "right";
+
+    // 空间探测：右侧/左侧各自能放下气泡宽度的可用空间
+    const spaceOnRight = viewportWidth - (tRect.right + gap);
+    const spaceOnLeft = tRect.left - gap;
+
+    if (effectivePosition === "right" && spaceOnRight < bRect.width) {
+      // 右侧放不下：左侧够放，或左侧空间明显比右侧宽裕，就翻转到左侧
+      if (spaceOnLeft >= bRect.width || spaceOnLeft > spaceOnRight) {
+        effectivePosition = "left";
+      }
+      // 两侧都放不下（视口特别窄）时保留right，交给最后的clamp兜底
+    } else if (effectivePosition === "left" && spaceOnLeft < bRect.width) {
+      if (spaceOnRight >= bRect.width || spaceOnRight > spaceOnLeft) {
+        effectivePosition = "right";
+      }
+    }
+
+    let top = 0;
+    let left = 0;
+
+    switch (effectivePosition) {
       case "top":
         top = tRect.top + scrollY - bRect.height - gap;
         left = tRect.left + scrollX + tRect.width / 2 - bRect.width / 2;
@@ -534,9 +737,6 @@
         left = tRect.left + scrollX - bRect.width - gap;
         break;
       case "right":
-        top = tRect.top + scrollY + tRect.height / 2 - bRect.height / 2;
-        left = tRect.right + scrollX + gap;
-        break;
       default:
         top = tRect.top + scrollY + tRect.height / 2 - bRect.height / 2;
         left = tRect.right + scrollX + gap;
@@ -550,9 +750,12 @@
   }
 
   function prevStep() {
+    // 注：目前"上一步"只在本页内回退，不支持跨页回退到上一页最后一步
+    // （跨页后退涉及浏览器历史导航，复杂度更高，暂不在这次范围内）
     if (currentStepIndex > 0) {
       currentStepIndex--;
       renderGuideUI();
+      persistFlowState(activeGuide.steps[currentStepIndex].globalStepNumber);
     }
   }
 
@@ -562,12 +765,32 @@
   }
 
   function advanceStep() {
-    if (currentStepIndex < activeGuide.steps.length - 1) {
+    const isLastStepOnPage = currentStepIndex >= activeGuide.steps.length - 1;
+
+    if (!isLastStepOnPage) {
       currentStepIndex++;
       renderGuideUI();
-    } else {
+      persistFlowState(activeGuide.steps[currentStepIndex].globalStepNumber);
+      return;
+    }
+
+    const isLastPageOfFlow = !flowMeta || flowMeta.pageIndex >= flowMeta.totalPages - 1;
+
+    if (isLastPageOfFlow) {
+      // 整个跨页流程全部完成
       showToast("🎉 恭喜！您已成功遵照合规完成了该业务流程。");
+      clearFlowState();
       disableGuide();
+    } else {
+      // 本页步骤已走完，但流程还有后续页面——不清空流程进度，只收起当前UI，
+      // 等用户跳转到下一页（真实业务系统的页面跳转）后，被动型自动续接逻辑会接上。
+      const lastGlobalNum = activeGuide.steps[currentStepIndex].globalStepNumber;
+      persistFlowState(lastGlobalNum + 1);
+      showToast("✅ 本页操作已完成，请前往下一步骤对应页面继续引导。");
+      isGuideActive = false;
+      activeGuide = null;
+      flowMeta = null;
+      cleanupUI();
     }
   }
 
