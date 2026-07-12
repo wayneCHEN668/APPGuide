@@ -88,7 +88,18 @@ interface ResolvedPage {
 }
 
 function resolvePageInFlow(flow: FlowRecord, pathname: string): ResolvedPage | null {
-  const pageIndex = flow.pages.findIndex((p) => normalizeUrl(p.url) === normalizeUrl(pathname));
+  let pageIndex = flow.pages.findIndex((p) => normalizeUrl(p.url) === normalizeUrl(pathname));
+
+  // 兜底：pages[].url 里没找到，但当前pathname其实就是这个flow的starturl——
+  // 说明用户是从这个流程的入口进来的，理应对应pages[0]，
+  // 只是starturl字段和pages[0].url字段的字符串写法有细微出入（多余斜杠/大小写等）。
+  // 这个兜底尤其重要：用户在"多候选"弹窗里选中某个流程后，插件会带着选中的flowId
+  // 重新请求同一个pathname；如果这里不兜底，一旦两个字段没有严格一致，
+  // 就会匹配失败、重新掉回分支B、又弹出一模一样的候选列表，表现成"点击没反应"。
+  if (pageIndex === -1 && flow.pages.length > 0 && normalizeUrl(flow.starturl) === normalizeUrl(pathname)) {
+    pageIndex = 0;
+  }
+
   if (pageIndex === -1) return null;
 
   let globalStepOffset = 0;

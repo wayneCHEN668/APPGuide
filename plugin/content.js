@@ -313,7 +313,7 @@
     if (isDebug) console.log("[DEBUG] S3 结果: score=", bestMatch ? bestMatch.score.toFixed(4) : "N/A", "label:", bestMatch ? bestMatch.label.substring(0,30) : "N/A", "selector:", bestMatch ? bestMatch.selector : "N/A");
     if (isDebug && s3Top.length > 1) console.log("[DEBUG] S3 Top5:", s3Top.sort((a,b) => parseFloat(b.score)-parseFloat(a.score)).slice(0,5));
 
-    if (bestMatch && bestMatch.score > 0.10) {
+    if (bestMatch && bestMatch.score >= 0.30) {
       return bestMatch;
     }
     return null;
@@ -483,6 +483,13 @@
     currentStepIndex = startLocalIndex;
     isGuideActive = true;
     renderGuideUI();
+
+    if (!isGuideActive || !activeGuide) {
+      // renderGuideUI 因为匹配不到目标元素而中断了（已经处理过toast提示），
+      // 这里不能再往下访问 activeGuide，直接结束
+      return;
+    }
+
     persistFlowState(activeGuide.steps[currentStepIndex].globalStepNumber);
     console.log("[BusinessGuide] 已加载业务流程指南：" + activeGuide.title +
       `（第${data.pageIndex + 1}/${data.totalPages}页，步骤${activeGuide.steps[currentStepIndex].globalStepNumber}/${data.totalSteps}）`);
@@ -596,7 +603,6 @@
           }
         }
       } else {
-        console.warn("[BusinessGuide] 未能在页面中匹配到符合要求的元素");
         step.resolvedSelector = null;
       }
     } else {
@@ -604,6 +610,22 @@
     }
 
     const activeSelector = step.resolvedSelector || step.selector;
+
+    // 目标元素彻底匹配失败（精确selector查不到 + 语义匹配也没找到）：
+    // 不能再假装正常渲染这一步的气泡——那样气泡会悬浮在页面上却没有任何高亮，
+    // 用户根本不知道该操作哪个控件，等于给了一个假的引导。
+    // 这里改为：明确提示"未找到引导入口"，并中断本次渲染（不显示气泡、不高亮）。
+    if (!targetElement) {
+      cleanupUI();
+      showToast(`⚠️ 未找到"${step.title}"对应的页面控件，引导已中断`);
+      isGuideActive = false;
+      activeGuide = null;
+      flowMeta = null;
+      // 注意：不清空跨页流程在storage里的进度。
+      // 匹配失败很可能是页面还没渲染完全这类时序问题，而不是流程本身作废；
+      // 保留进度，方便用户刷新页面或手动重试时能续接回同一步，而不是被迫从头再来。
+      return;
+    }
 
     if (targetElement) {
       highlightElement = document.createElement("div");
@@ -755,6 +777,7 @@
     if (currentStepIndex > 0) {
       currentStepIndex--;
       renderGuideUI();
+      if (!isGuideActive || !activeGuide) return; // 上一步的目标元素没匹配到，已中断
       persistFlowState(activeGuide.steps[currentStepIndex].globalStepNumber);
     }
   }
@@ -770,6 +793,7 @@
     if (!isLastStepOnPage) {
       currentStepIndex++;
       renderGuideUI();
+      if (!isGuideActive || !activeGuide) return; // 下一步的目标元素没匹配到，已中断
       persistFlowState(activeGuide.steps[currentStepIndex].globalStepNumber);
       return;
     }

@@ -10,7 +10,7 @@
       "title": "复核已生成的助讲智能体",
       "description": "本指南用于复核已生成的助讲智能体效果。",
       "steps": [
-        { "title": "查看历史任务", "description": "点击「历史任务」标签，查看已生成的助讲智能体列表。", "highlightStyle": "glow" }
+        { "title": "查看历史", "description": "点击「历史任务」标签，查看已生成的助讲智能体列表。", "highlightStyle": "glow" }
       ]
     }
   ]
