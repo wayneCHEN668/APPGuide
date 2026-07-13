@@ -1,4 +1,5 @@
 import express from "express";
+import * as mysql from "mysql2/promise";
 import fs from "fs";
 import path from "path";
 
@@ -36,21 +37,56 @@ interface FlowRecord {
 
 // ============================================================
 // 数据访问层
-// TODO: 这里目前是"模拟多条DB记录"的临时实现，用 api/flows/ 目录下
-// 每个 json 文件代表一条记录（对应DB里的一行：id/class/subclass/starturl/pages）。
-// 接入真实数据库时，只需要替换 loadAllFlows() 这一个函数的实现，
-// 下面的匹配/分支逻辑不需要改动。
+// 已接入 MySQL 数据库。loadAllFlows() 改为异步，从 appguide 表读取所有记录。
+// steps 列（JSON类型）中存储了 title 和 pages，映射为 FlowRecord。
+// 下面的匹配/分支逻辑不需要改动（仅调用处加了 await）。
 // ============================================================
 
-const flowsDir = path.resolve("api/flows");
+const pool = mysql.createPool({
+  host: process.env.DB_HOST || "81.69.17.148",
+  port: parseInt(process.env.DB_PORT || "3306", 10),
+  database: process.env.DB_DATABASE || "wuzi",
+  user: process.env.DB_USERNAME || "webapp_user",
+  password: process.env.DB_PASSWORD || "StrongPass123!",
+  waitForConnections: true,
+  connectionLimit: 10,
+  connectTimeout: 5000,
+});
 
-function loadAllFlows(): FlowRecord[] {
-  const files = fs.readdirSync(flowsDir).filter((f) => f.endsWith(".json"));
-  return files.map((f) => {
+async function loadAllFlowsFromDB(): Promise<FlowRecord[] | null> {
+  try {
+    const [rows] = await pool.query("SELECT id, class, subclass, starturl, steps FROM appguide");
+    return (rows as any[]).map((row) => {
+      const stepsData = typeof row.steps === "string" ? JSON.parse(row.steps) : row.steps;
+      return {
+        id: row.id,
+        class: row.class || "",
+        subclass: row.subclass || "",
+        title: stepsData.title || "",
+        starturl: row.starturl,
+        pages: stepsData.pages || [],
+      } as FlowRecord;
+    });
+  } catch (err) {
+    console.warn("[guide_server] DB 不可用，回退到本地 JSON 文件:", (err as Error).message);
+    return null;
+  }
+}
+
+function loadAllFlowsFromFiles(): FlowRecord[] {
+  const flowsDir = path.resolve("api/flows");
+  const files = fs.readdirSync(flowsDir).filter((f: string) => f.endsWith(".json"));
+  return files.map((f: string) => {
     const raw = JSON.parse(fs.readFileSync(path.join(flowsDir, f), "utf-8"));
     if (!raw.id) raw.id = path.basename(f, ".json");
     return raw as FlowRecord;
   });
+}
+
+async function loadAllFlows(): Promise<FlowRecord[]> {
+  const dbResult = await loadAllFlowsFromDB();
+  if (dbResult !== null) return dbResult;
+  return loadAllFlowsFromFiles();
 }
 
 // ============================================================
@@ -152,7 +188,7 @@ app.use((_req, res, next) => {
 //   - 多条 → mode:"choose"，返回候选列表，不做偏好记忆
 // ============================================================
 
-app.get("/api/guide", (req, res) => {
+app.get("/api/guide", async (req, res) => {
   try {
     const pathname = typeof req.query.url === "string" ? req.query.url : "";
     const inProgressFlowId = typeof req.query.flowId === "string" ? req.query.flowId : "";
@@ -162,7 +198,7 @@ app.get("/api/guide", (req, res) => {
       return;
     }
 
-    const allFlows = loadAllFlows();
+    const allFlows = await loadAllFlows();
 
     // 分支A
     if (inProgressFlowId) {
@@ -209,6 +245,69 @@ app.get("/api/guide", (req, res) => {
   } catch (err) {
     console.error("[guide_server] /api/guide 处理出错:", err);
     res.status(500).json({ success: false, reason: "server_error", message: "服务端处理引导数据时出错。" });
+  }
+});
+
+// ============================================================
+// GET /api/flows/by-starturl?starturl=<url>
+// 通过 starturl 获取所有匹配记录（可能多条），返回全部字段
+// ============================================================
+
+app.get("/api/flows/by-starturl", async (req, res) => {
+  try {
+    const starturl = typeof req.query.starturl === "string" ? req.query.starturl : "";
+    if (!starturl) {
+      res.status(400).json({ success: false, reason: "bad_request", message: "缺少 starturl 参数。" });
+      return;
+    }
+    const [rows] = await pool.query("SELECT * FROM appguide WHERE starturl = ?", [starturl]);
+    const results = (rows as any[]).map((row) => ({
+      id: row.id,
+      class: row.class,
+      subclass: row.subclass,
+      starturl: row.starturl,
+      steps: typeof row.steps === "string" ? JSON.parse(row.steps) : row.steps,
+      updated_date: row.updated_date,
+    }));
+    res.json({ success: true, data: results });
+  } catch (err) {
+    console.error("[guide_server] /api/flows/by-starturl 处理出错:", err);
+    res.status(500).json({ success: false, reason: "server_error", message: "服务端查询数据时出错。" });
+  }
+});
+
+// ============================================================
+// GET /api/flows/by-id?id=<uuid>
+// 通过 id 获取唯一记录，返回全部字段；未找到则 404
+// ============================================================
+
+app.get("/api/flows/by-id", async (req, res) => {
+  try {
+    const id = typeof req.query.id === "string" ? req.query.id : "";
+    if (!id) {
+      res.status(400).json({ success: false, reason: "bad_request", message: "缺少 id 参数。" });
+      return;
+    }
+    const [rows] = await pool.query("SELECT * FROM appguide WHERE id = ?", [id]);
+    const row = (rows as any[])[0];
+    if (!row) {
+      res.status(404).json({ success: false, reason: "not_found", message: "未找到指定 ID 的记录。" });
+      return;
+    }
+    res.json({
+      success: true,
+      data: {
+        id: row.id,
+        class: row.class,
+        subclass: row.subclass,
+        starturl: row.starturl,
+        steps: typeof row.steps === "string" ? JSON.parse(row.steps) : row.steps,
+        updated_date: row.updated_date,
+      },
+    });
+  } catch (err) {
+    console.error("[guide_server] /api/flows/by-id 处理出错:", err);
+    res.status(500).json({ success: false, reason: "server_error", message: "服务端查询数据时出错。" });
   }
 });
 

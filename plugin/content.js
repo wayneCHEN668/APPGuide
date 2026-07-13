@@ -241,6 +241,25 @@
       })));
     }
 
+    // 策略0: 完整标题匹配 (最高优先级)
+    // 比较前去掉双方的非文字符号（如 *、#、- 等），避免因格式差异导致相等匹配失败
+    const stripSymbols = (str) => str.replace(/[^\w\u4e00-\u9fff\s]/g, '').replace(/\s+/g, ' ').trim();
+    const normalizedTitle = stripSymbols(step.title);
+    if (isDebug) console.log("[DEBUG] S0 完整标题匹配: step.title =", JSON.stringify(step.title), "normalized =", JSON.stringify(normalizedTitle));
+    for (const item of scanned) {
+      const normalizedLabel = stripSymbols(item.label);
+      if (normalizedLabel === normalizedTitle) {
+        if (isDebug) console.log("[DEBUG] S0 命中! label:", item.label.substring(0, 30), "normalized =", JSON.stringify(normalizedLabel));
+        return {
+          element: item.element,
+          selector: item.selector,
+          label: item.label,
+          score: 0.95
+        };
+      }
+    }
+    if (isDebug) console.log("[DEBUG] S0 未命中，进入S1");
+
     // 策略1: 标题关键词子串匹配 (高置信度)
     const titleChars = step.title.replace(/^(设置|选择|找到|点击|上传|提交)/, '').trim();
     if (isDebug) console.log("[DEBUG] S1 关键词:", JSON.stringify(titleChars));
@@ -810,7 +829,7 @@
       // 等用户跳转到下一页（真实业务系统的页面跳转）后，被动型自动续接逻辑会接上。
       const lastGlobalNum = activeGuide.steps[currentStepIndex].globalStepNumber;
       persistFlowState(lastGlobalNum + 1);
-      showToast("✅ 本页操作已完成，请前往下一步骤对应页面继续引导。");
+      showToast("✅ 本页操作已完成，请前往下一步骤对应页面，按 Alt+G 继续引导。");
       isGuideActive = false;
       activeGuide = null;
       flowMeta = null;

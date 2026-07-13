@@ -23,7 +23,6 @@
         { "title": "课程简介", "description": "课程简介是为了帮助学生更好地了解课程内容。", "highlightStyle": "glow" },
         { "title": "从课件库添加", "description": "从课件库中选择并添加课件。", "highlightStyle": "pulse" },
         { "title": "确认添加", "description": "从课件列表中勾选需要添加的课件，点击确认添加。", "highlightStyle": "pulse" },
-        { "title": "发布", "description": "将课程发布，如需审核则无需修改。", "highlightStyle": "glow" },
         { "title": "保存课程", "description": "单击保存课程，完成课程的创建。", "highlightStyle": "pulse" }
       ]
     }

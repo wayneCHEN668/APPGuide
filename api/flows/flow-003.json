@@ -1,16 +1,22 @@
 {
-  "id": "flow-003",
-  "class": "ppt-agent",
-  "subclass": "review",
-  "title": "PPT助讲智能体-复核流程（同起始页示例，用于验证多候选分支）",
-  "starturl": "https://zzppt.com",
+  "title": "安排课程到班级",
+  "starturl": "http://81.69.17.148:8080/dashboard",
   "pages": [
     {
-      "url": "https://zzppt.com",
-      "title": "复核已生成的助讲智能体",
-      "description": "本指南用于复核已生成的助讲智能体效果。",
+      "url": "http://81.69.17.148:8080/dashboard",
+      "title": "为班级安排课程",
+      "description": "将课程安排到指定班级。",
       "steps": [
-        { "title": "查看历史", "description": "点击「历史任务」标签，查看已生成的助讲智能体列表。", "highlightStyle": "glow" }
+        { "title": "课程安排", "description": "点击课程安排菜单，打开课程安排页面。", "highlightStyle": "pulse" }
+      ]
+    },
+    {
+      "url": "http://81.69.17.148:8080/schedules",
+      "title": "选择班级和课程",
+      "description": "选择班级和课程进行安排。",
+      "steps": [
+        { "title": "安排课程", "description": "单击安排课程，可按课程名称筛选。勾选课程和班级。", "highlightStyle": "pulse" },
+        { "title": "确定安排课程", "description": "选择好课程和班级后，单击保存课程与班级的分配。", "highlightStyle": "pulse" }
       ]
     }
   ]
