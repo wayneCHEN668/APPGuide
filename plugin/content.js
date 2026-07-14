@@ -119,11 +119,25 @@
     // ------------------ 以下只在 iframe worker 身份下生效 ------------------
     // 被动等待顶层广播的指令：找一个目标元素 / 清除当前高亮。
     // 不主动发起任何请求，不持有引导状态。
+    console.log("[BusinessGuide][iframe] worker已就绪，等待顶层指令。当前文档URL:", window.location.href);
+
     window.addEventListener("message", (event) => {
       const data = event.data;
-      if (!data || data.__appguide !== true) return;
+      if (!data || data.__appguide !== true) {
+        return; // 不是我们自己的协议消息，绝大多数postMessage流量都会走这条，不打日志避免刷屏
+      }
+
       // 单层嵌套场景下，只信任直属父frame发来的指令，避免被页面自身脚本的postMessage干扰
-      if (event.source !== window.parent) return;
+      if (event.source !== window.parent) {
+        console.warn(
+          "[BusinessGuide][iframe] 收到__appguide协议消息，但event.source不是window.parent，已丢弃。" +
+          "如果顶层确实发了指令但这里一直丢弃，通常是嵌套层级超过1层，或者浏览器对这个跨域iframe的source标识有特殊处理。",
+          { messageType: data.type, hasParent: window.parent !== window }
+        );
+        return;
+      }
+
+      console.log("[BusinessGuide][iframe] 收到顶层指令:", data.type, data.type === "find" ? `(步骤: "${data.step && data.step.title}")` : "");
 
       if (data.type === "clear-highlight") {
         cleanupUI();
@@ -136,6 +150,9 @@
         if (local) {
           usedElements.add(local.element);
           createHighlightForElement(local.element, data.step.highlightStyle);
+          console.log(`[BusinessGuide][iframe] 本文档内找到匹配元素，已画高亮，回复顶层 found:true`);
+        } else {
+          console.log(`[BusinessGuide][iframe] 本文档内没有找到"${data.step && data.step.title}"对应的元素，回复顶层 found:false`);
         }
         try {
           window.parent.postMessage({
@@ -145,7 +162,7 @@
             found: !!local,
           }, "*");
         } catch (e) {
-          // 极端情况下parent已经不可达，忽略即可
+          console.error("[BusinessGuide][iframe] 回复顶层失败（parent可能已不可达）:", e);
         }
       }
     });
@@ -676,6 +693,12 @@
     // 否则（不是顶层，或者顶层但没有iframe）直接判定未找到。
     // 注：当前只处理单层嵌套，不会让子iframe再往下递归探测自己的子iframe。
     const iframeEls = IS_TOP_FRAME ? Array.from(document.querySelectorAll("iframe")) : [];
+    console.log(
+      `[BusinessGuide] 本文档内未找到"${step.title}"，` +
+      (IS_TOP_FRAME
+        ? `检测到页面内共有 ${iframeEls.length} 个<iframe>` + (iframeEls.length > 0 ? "，开始向它们广播探测请求..." : "，无iframe可探测，直接判定未找到。")
+        : "（当前是iframe worker身份，不会再往下探测子iframe）")
+    );
     if (iframeEls.length === 0) {
       handleTargetNotFound(step);
       return;
@@ -778,30 +801,56 @@
 
       function onMessage(event) {
         const data = event.data;
-        if (!data || data.__appguide !== true || data.type !== "find-result" || data.requestId !== requestId) return;
-        if (!data.found) return; // 没找到的回复不用处理，继续等其它iframe或超时
+        if (!data || data.__appguide !== true || data.type !== "find-result") return;
+        if (data.requestId !== requestId) {
+          // 收到的是别的探测请求的回复（比如上一步还没超时就来了新一步的探测），正常现象，忽略即可
+          return;
+        }
+        if (!data.found) {
+          console.log("[BusinessGuide] 收到某个iframe的回复：没找到，继续等其它iframe或超时。");
+          return;
+        }
         const matchedIframe = iframeEls.find((el) => el.contentWindow === event.source);
-        if (matchedIframe && !settled) {
+        if (!matchedIframe) {
+          // 理论上不该发生：收到了found:true，但反查不到是哪个<iframe>标签发的。
+          // 常见原因：这个iframe在探测过程中被重新导航/刷新了，导致contentWindow引用已经变了；
+          // 或者页面里的<iframe>是脚本动态创建/替换的，探测发出后到回复回来之间DOM结构变了。
+          console.warn(
+            "[BusinessGuide] 收到found:true的回复，但反查不到对应的<iframe>标签，本次判定为未找到。" +
+            "event.source:", event.source
+          );
+          return;
+        }
+        if (!settled) {
           settled = true;
+          console.log("[BusinessGuide] 探测成功：目标元素位于某个子iframe内，已收到其回复。");
           window.removeEventListener("message", onMessage);
           resolve(matchedIframe);
         }
       }
       window.addEventListener("message", onMessage);
 
-      iframeEls.forEach((el) => {
+      let sentCount = 0;
+      iframeEls.forEach((el, idx) => {
         try {
-          el.contentWindow && el.contentWindow.postMessage(
+          if (!el.contentWindow) {
+            console.warn(`[BusinessGuide] 第${idx + 1}个<iframe>没有可用的contentWindow（可能跨域被浏览器拦截，或还没加载完成），跳过。`);
+            return;
+          }
+          el.contentWindow.postMessage(
             { __appguide: true, type: "find", requestId, step: serializedStep },
             "*"
           );
+          sentCount++;
         } catch (e) {
-          // 极端情况下iframe还没ready/跨域限制，忽略即可，等超时兜底
+          console.warn(`[BusinessGuide] 向第${idx + 1}个<iframe>广播探测请求失败:`, e);
         }
       });
+      console.log(`[BusinessGuide] 已向 ${sentCount}/${iframeEls.length} 个<iframe>广播探测请求"${step.title}"，requestId=${requestId}，最多等待${IFRAME_PROBE_TIMEOUT_MS}ms`);
 
       setTimeout(() => {
         if (!settled) {
+          console.warn(`[BusinessGuide] 探测超时（${IFRAME_PROBE_TIMEOUT_MS}ms内没有任何iframe回复找到目标），requestId=${requestId}`);
           settled = true;
           window.removeEventListener("message", onMessage);
           resolve(null);
