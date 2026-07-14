@@ -250,12 +250,18 @@
       }
       
       if (!labelText) {
-        // Element Plus / 自定义 UI: 查找 .selectLabel 兄弟元素
+        // Element Plus / 自定义 UI: 查找 .selectLabel 兄弟元素，
+        // 或者更标准的 <label> 标签兄弟元素（哪怕它没有 for 属性）——
+        // 后者是更通用的写法，不同页面/不同组件库可能用其中任意一种。
         let scanEl = el;
         for (let level = 0; level < 6 && !labelText && scanEl; level++) {
           let prev = scanEl.previousElementSibling;
           while (prev) {
             if (prev.classList && prev.classList.contains('selectLabel')) {
+              labelText = (prev.textContent || '').trim();
+              break;
+            }
+            if (prev.tagName && prev.tagName.toLowerCase() === 'label') {
               labelText = (prev.textContent || '').trim();
               break;
             }
@@ -327,19 +333,16 @@
     const scanned = scanDOM();
     if (scanned.length === 0) return null;
 
-    const isDebug = step.title === "上传PPT文件";
+    // 调试开关：在Chrome控制台执行 window.__appguideDebug = true 即可对"接下来匹配的每一步"
+    // 打印详细的候选打分过程；执行 window.__appguideDebug = false 关闭。
+    // （之前这里是写死 step.title === "上传PPT文件" 只能调试固定的某一步，现在改成运行时开关，
+    // 不用改代码就能对任意一步开启，包括iframe worker里也认这个开关）
+    const isDebug = !!window.__appguideDebug;
     if (isDebug) {
-      console.log("[DEBUG] === 匹配步骤:", step.title, "===");
+      console.log("[DEBUG] === 匹配步骤:", step.title, "===", IS_TOP_FRAME ? "(顶层文档)" : "(iframe worker: " + window.location.href + ")");
       console.log("[DEBUG] 扫描到", scanned.length, "个控件");
-      console.log("[DEBUG] 前10个控件:", scanned.slice(0, 10).map(it => ({
+      console.log("[DEBUG] 全部控件:", scanned.map(it => ({
         tag: it.type, selector: it.selector, label: it.label.substring(0,40)
-      })));
-      const relevant = scanned.filter(it =>
-        it.type === "input" || it.label.includes("上传") || it.label.includes("文稿") ||
-        it.label.includes("拖拽") || it.label.includes("文件")
-      );
-      console.log("[DEBUG] 相关控件 (input/上传/文稿/拖拽/文件):", relevant.map(it => ({
-        tag: it.type, selector: it.selector, label: it.label.substring(0,60), className: it.className.substring(0,40)
       })));
     }
 
