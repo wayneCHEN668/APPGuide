@@ -30,10 +30,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     const flowId = message.flowId || "";
 
     chrome.storage.local.get(["apiBaseUrl"], (result) => {
-      const apiBaseUrl = result.apiBaseUrl || "81.69.17.148:3010";
+      const apiBaseUrl = result.apiBaseUrl || "api.skillcloud.cn";
       // 自动补全 http:// 协议前缀
       const baseUrl = /^https?:\/\//i.test(apiBaseUrl) ? apiBaseUrl : `http://${apiBaseUrl}`;
-      let fetchUrl = `${baseUrl}/api/guide?url=${encodeURIComponent(cleanPath)}`;
+      // 生产环境统一使用 REST 风格 method 参数
+      let fetchUrl = `${baseUrl}/rest?method=appguide.flows.guide&url=${encodeURIComponent(cleanPath)}`;
       if (flowId) {
         // 携带正在进行中的流程id，供服务端优先在该流程内匹配当前页（跨页续接）
         fetchUrl += `&flowId=${encodeURIComponent(flowId)}`;

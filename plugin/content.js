@@ -26,6 +26,18 @@
   let highlightElement = null;
   let resizeObserver = null;
 
+  // 本次页面加载内，已经被某一步选中/高亮过的元素——用于"重复label去重"（见 findBestSemanticMatch）。
+  // 用WeakSet是因为不需要手动清理，元素被移出DOM后会自动被垃圾回收。
+  // 作用域仅限"当前这一个文档"，不跨iframe/跨页面共享。
+  let usedElements = new WeakSet();
+
+  // 顶层文档 vs iframe worker 身份判定。
+  // 顶层：持有引导状态、渲染气泡、读写storage、调用API——唯一的"指挥官"。
+  // iframe：只被动响应顶层广播的"帮我找这个控件"指令，自己画高亮，不渲染气泡、不碰API/storage。
+  // （当前只处理单层嵌套：iframe内部再嵌套iframe的情况不在这次范围内）
+  const IS_TOP_FRAME = (window === window.top);
+  const IFRAME_PROBE_TIMEOUT_MS = 800;
+
   // 跨页流程运行时状态：存在 chrome.storage.local，仅记录"进行到哪一步了"，
   // 不存具体steps内容（那些每次都从API重新拉取，保证内容永远最新）
   const FLOW_STATE_KEY = "guideFlowState";
@@ -33,45 +45,111 @@
 
   // 注：API 地址由 popup 配置并存储在 chrome.storage，实际 fetch 由 background worker 代理执行
 
-  console.log("[BusinessGuide] 插件内容脚本已成功注入目标系统。支持高级本地语义模糊匹配 + 跨页流程续接。");
+  console.log(
+    IS_TOP_FRAME
+      ? "[BusinessGuide] 插件内容脚本已成功注入目标系统（顶层）。支持高级本地语义模糊匹配 + 跨页流程续接 + iframe内控件探测。"
+      : "[BusinessGuide] 插件内容脚本已注入iframe子文档，作为顶层的控件探测worker运行。"
+  );
 
-  // 初始化：监听键盘 Alt+G
-  window.addEventListener("keydown", (e) => {
-    if (e.altKey && (e.key === "g" || e.key === "G" || e.key === "9")) {
-      e.preventDefault();
-      toggleGuide();
-    }
-  });
+  if (IS_TOP_FRAME) {
+    // ------------------ 以下监听器只在顶层文档生效 ------------------
 
-  // 监听来自后台 Service Worker 的全局 Chrome 命令
-  if (chrome.runtime && chrome.runtime.onMessage) {
-    chrome.runtime.onMessage.addListener((message) => {
-      if (message.action === "toggle-guide") {
+    // 初始化：监听键盘 Alt+G
+    window.addEventListener("keydown", (e) => {
+      if (e.altKey && (e.key === "g" || e.key === "G" || e.key === "9")) {
+        e.preventDefault();
         toggleGuide();
       }
     });
-  }
 
-  // ------------------ 跨页流程：被动型自动续接 ------------------
-  // 页面刚加载时（脚本刚被注入），静默检查是否有一个尚未过期的进行中流程，
-  // 如果当前页恰好是该流程的下一页，就自动恢复引导，不需要用户再按一次 Alt+G。
-  // 注意：这里只在 mode==="resume" 时才动作；如果检测结果是 new/choose/not_found
-  // （说明用户此刻打开的页面跟进行中的流程无关），一律保持安静，不弹任何提示，
-  // 也不清空已存的流程状态（万一用户只是临时切走，待会儿还会跳回正确的页面）。
-  (async function autoResumeFlowOnLoad() {
-    const state = await getFlowStateIfValid();
-    if (!state) return;
-
-    try {
-      const data = await fetchGuideFromApi(window.location.pathname, state.flowId);
-      if (data && data.success && data.mode === "resume") {
-        console.log("[BusinessGuide] 检测到进行中的跨页流程，自动续接：", state.flowId);
-        startGuideFromResolved(data, state);
-      }
-    } catch (e) {
-      console.warn("[BusinessGuide] 自动续接检测失败（静默忽略，不打扰用户）:", e);
+    // 监听来自后台 Service Worker 的全局 Chrome 命令
+    if (chrome.runtime && chrome.runtime.onMessage) {
+      chrome.runtime.onMessage.addListener((message) => {
+        if (message.action === "toggle-guide") {
+          toggleGuide();
+        }
+      });
     }
-  })();
+
+    // ------------------ 跨页流程：被动型自动续接 ------------------
+    // 页面刚加载时（脚本刚被注入），静默检查是否有一个尚未过期的进行中流程，
+    // 如果当前页恰好是该流程的下一页，就自动恢复引导，不需要用户再按一次 Alt+G。
+    // 注意：这里只在 mode==="resume" 时才动作；如果检测结果是 new/choose/not_found
+    // （说明用户此刻打开的页面跟进行中的流程无关），一律保持安静，不弹任何提示，
+    // 也不清空已存的流程状态（万一用户只是临时切走，待会儿还会跳回正确的页面）。
+    (async function autoResumeFlowOnLoad() {
+      const state = await getFlowStateIfValid();
+      if (!state) return;
+
+      try {
+        const data = await fetchGuideFromApi(window.location.href.replace(/\/+$/, ""), state.flowId);
+        if (data && data.success && data.mode === "resume") {
+          console.log("[BusinessGuide] 检测到进行中的跨页流程，自动续接：", state.flowId);
+          startGuideFromResolved(data, state);
+        }
+      } catch (e) {
+        console.warn("[BusinessGuide] 自动续接检测失败（静默忽略，不打扰用户）:", e);
+      }
+    })();
+
+    // 监听页面元素焦点的捕获（自动流程流转）
+    document.addEventListener("focus", (e) => {
+      if (!isGuideActive || !activeGuide) return;
+
+      const step = activeGuide.steps[currentStepIndex];
+      if (!step) return;
+
+      try {
+        const activeSelector = step.resolvedSelector || step.selector;
+        const target = document.querySelector(activeSelector);
+        if (target && (target === e.target || target.contains(e.target))) {
+          console.log("[BusinessGuide] 操作员精准定位到当前目标：", activeSelector);
+
+          if (step.actionType === "focus") {
+            setTimeout(() => {
+              advanceStep();
+            }, 800);
+          }
+        }
+      } catch(err) {
+        console.error(err);
+      }
+    }, true);
+  } else {
+    // ------------------ 以下只在 iframe worker 身份下生效 ------------------
+    // 被动等待顶层广播的指令：找一个目标元素 / 清除当前高亮。
+    // 不主动发起任何请求，不持有引导状态。
+    window.addEventListener("message", (event) => {
+      const data = event.data;
+      if (!data || data.__appguide !== true) return;
+      // 单层嵌套场景下，只信任直属父frame发来的指令，避免被页面自身脚本的postMessage干扰
+      if (event.source !== window.parent) return;
+
+      if (data.type === "clear-highlight") {
+        cleanupUI();
+        return;
+      }
+
+      if (data.type === "find") {
+        cleanupUI(); // 开始新一轮查找前，先清掉自己可能还留着的旧高亮
+        const local = resolveLocalTarget(data.step);
+        if (local) {
+          usedElements.add(local.element);
+          createHighlightForElement(local.element, data.step.highlightStyle);
+        }
+        try {
+          window.parent.postMessage({
+            __appguide: true,
+            type: "find-result",
+            requestId: data.requestId,
+            found: !!local,
+          }, "*");
+        } catch (e) {
+          // 极端情况下parent已经不可达，忽略即可
+        }
+      }
+    });
+  }
 
   // ------------------ 客户端本地语义匹配引擎 (Semantic Matcher) ------------------
   
@@ -220,6 +298,13 @@
     return list;
   }
 
+  // 从一组"打分相同"的候选里，优先挑一个本次页面还没被别的步骤用过的；
+  // 如果全都用过了（大概率是想回头再强调同一个元素），就退回原来的行为——选第一个。
+  function pickPreferUnused(items) {
+    const unused = items.find((it) => !usedElements.has(it.element));
+    return unused || items[0];
+  }
+
   // 对特定步骤指南执行本地语义匹配，返回最匹配的页面 DOM 元素
   function findBestSemanticMatch(step) {
     const scanned = scanDOM();
@@ -246,41 +331,52 @@
     const stripSymbols = (str) => str.replace(/[^\w\u4e00-\u9fff\s]/g, '').replace(/\s+/g, ' ').trim();
     const normalizedTitle = stripSymbols(step.title);
     if (isDebug) console.log("[DEBUG] S0 完整标题匹配: step.title =", JSON.stringify(step.title), "normalized =", JSON.stringify(normalizedTitle));
+    const s0Matches = [];
     for (const item of scanned) {
       const normalizedLabel = stripSymbols(item.label);
       if (normalizedLabel === normalizedTitle) {
-        if (isDebug) console.log("[DEBUG] S0 命中! label:", item.label.substring(0, 30), "normalized =", JSON.stringify(normalizedLabel));
-        return {
-          element: item.element,
-          selector: item.selector,
-          label: item.label,
-          score: 0.95
-        };
+        s0Matches.push(item);
       }
+    }
+    if (s0Matches.length > 0) {
+      const chosen = pickPreferUnused(s0Matches);
+      if (isDebug) console.log("[DEBUG] S0 命中! label:", chosen.label.substring(0, 30), `(候选数:${s0Matches.length}, 已去重复用)`);
+      return {
+        element: chosen.element,
+        selector: chosen.selector,
+        label: chosen.label,
+        score: 0.95
+      };
     }
     if (isDebug) console.log("[DEBUG] S0 未命中，进入S1");
 
     // 策略1: 标题关键词子串匹配 (高置信度)
     const titleChars = step.title.replace(/^(设置|选择|找到|点击|上传|提交)/, '').trim();
     if (isDebug) console.log("[DEBUG] S1 关键词:", JSON.stringify(titleChars));
+    const s1Matches = [];
     for (const item of scanned) {
       const labelInTitle = titleChars.length >= 2 && item.label.includes(titleChars);
       const labelInDesc = item.label.length >= 2 && step.description.includes(item.label);
       if (labelInTitle || labelInDesc) {
-        if (isDebug) console.log("[DEBUG] S1 命中! label:", item.label.substring(0,30), "reason:", labelInTitle ? "label含关键词" : "label在描述中");
-        return {
-          element: item.element,
-          selector: item.selector,
-          label: item.label,
-          score: 0.90 + (Math.min(item.label.length, 6) / Math.max(item.label.length, 6)) * 0.10
-        };
+        s1Matches.push(item);
       }
+    }
+    if (s1Matches.length > 0) {
+      const chosen = pickPreferUnused(s1Matches);
+      if (isDebug) console.log("[DEBUG] S1 命中! label:", chosen.label.substring(0,30), `(候选数:${s1Matches.length}, 已去重复用)`);
+      return {
+        element: chosen.element,
+        selector: chosen.selector,
+        label: chosen.label,
+        score: 0.90 + (Math.min(chosen.label.length, 6) / Math.max(chosen.label.length, 6)) * 0.10
+      };
     }
     if (isDebug) console.log("[DEBUG] S1 未命中，进入S2");
 
     // 策略2: 标题全字符双向重叠检测
     if (isDebug) console.log("[DEBUG] S2 开始扫描...");
     let s2Top = [];
+    const s2Matches = [];
     for (const item of scanned) {
       const titleSet = new Set(step.title.replace(/\s/g, '').split(''));
       const labelSet = new Set(item.label.replace(/\s/g, '').split(''));
@@ -292,21 +388,25 @@
         s2Top.push({label: item.label.substring(0,30), selector: item.selector, overlap, titleOverlap: titleOverlap.toFixed(2), labelOverlap: labelOverlap.toFixed(2), best: bestOverlap.toFixed(2)});
       }
       if (bestOverlap >= 0.5 && titleSet.size >= 2) {
-        if (isDebug) console.log("[DEBUG] S2 命中! label:", item.label.substring(0,30), "bestOverlap:", bestOverlap.toFixed(2));
-        return {
-          element: item.element,
-          selector: item.selector,
-          label: item.label,
-          score: 0.70 + bestOverlap * 0.30
-        };
+        s2Matches.push({ ...item, bestOverlap });
       }
+    }
+    if (s2Matches.length > 0) {
+      const chosen = pickPreferUnused(s2Matches);
+      if (isDebug) console.log("[DEBUG] S2 命中! label:", chosen.label.substring(0,30), "bestOverlap:", chosen.bestOverlap.toFixed(2), `(候选数:${s2Matches.length}, 已去重复用)`);
+      return {
+        element: chosen.element,
+        selector: chosen.selector,
+        label: chosen.label,
+        score: 0.70 + chosen.bestOverlap * 0.30
+      };
     }
     if (isDebug) console.log("[DEBUG] S2 未命中 (bestOverlap>=0.5)。高重叠候选:", s2Top.sort((a,b) => parseFloat(b.best)-parseFloat(a.best)).slice(0,5));
 
     // 策略3: 加权 TF 余弦相似度 (标题3份 + 描述1份)
     const query = step.title + " " + step.title + " " + step.title + " " + step.description;
-    let bestMatch = null;
     let highestScore = 0;
+    let bestCandidates = []; // 记录并列最高分的所有候选（重复label场景下，分数会完全相等）
     let s3Top = [];
 
     scanned.forEach(item => {
@@ -317,19 +417,27 @@
 
       if (score > highestScore) {
         highestScore = score;
-        bestMatch = {
-          element: item.element,
-          selector: item.selector,
-          label: item.label,
-          score: score
-        };
+        bestCandidates = [item];
+      } else if (score === highestScore && score > 0) {
+        bestCandidates.push(item);
       }
       if (isDebug && score > 0.1) {
         s3Top.push({label: item.label.substring(0,30), selector: item.selector, score: score.toFixed(4)});
       }
     });
 
-    if (isDebug) console.log("[DEBUG] S3 结果: score=", bestMatch ? bestMatch.score.toFixed(4) : "N/A", "label:", bestMatch ? bestMatch.label.substring(0,30) : "N/A", "selector:", bestMatch ? bestMatch.selector : "N/A");
+    let bestMatch = null;
+    if (bestCandidates.length > 0) {
+      const chosen = pickPreferUnused(bestCandidates);
+      bestMatch = {
+        element: chosen.element,
+        selector: chosen.selector,
+        label: chosen.label,
+        score: highestScore
+      };
+    }
+
+    if (isDebug) console.log("[DEBUG] S3 结果: score=", bestMatch ? bestMatch.score.toFixed(4) : "N/A", "label:", bestMatch ? bestMatch.label.substring(0,30) : "N/A", "selector:", bestMatch ? bestMatch.selector : "N/A", `(候选数:${bestCandidates.length})`);
     if (isDebug && s3Top.length > 1) console.log("[DEBUG] S3 Top5:", s3Top.sort((a,b) => parseFloat(b.score)-parseFloat(a.score)).slice(0,5));
 
     if (bestMatch && bestMatch.score >= 0.30) {
@@ -339,30 +447,7 @@
   }
 
   // ------------------ 焦点与事件追踪 ------------------
-
-  // 监听页面元素焦点的捕获
-  document.addEventListener("focus", (e) => {
-    if (!isGuideActive || !activeGuide) return;
-    
-    const step = activeGuide.steps[currentStepIndex];
-    if (!step) return;
-
-    try {
-      const activeSelector = step.resolvedSelector || step.selector;
-      const target = document.querySelector(activeSelector);
-      if (target && (target === e.target || target.contains(e.target))) {
-        console.log("[BusinessGuide] 操作员精准定位到当前目标：", activeSelector);
-        
-        if (step.actionType === "focus") {
-          setTimeout(() => {
-            advanceStep();
-          }, 800);
-        }
-      }
-    } catch(err) {
-      console.error(err);
-    }
-  }, true);
+  // （监听器已合并进上方 IS_TOP_FRAME 判定块内，这里不再重复注册）
 
   // 核心功能：开关引导
   function toggleGuide() {
@@ -429,7 +514,7 @@
 
   // 核心功能：开关引导（用户手动按 Alt+G 触发）
   async function enableGuide() {
-    const cleanPath = window.location.pathname;
+    const cleanPath = window.location.href.replace(/\/+$/, "");
     console.log("[BusinessGuide] 正在检测页面并获取 API 校验...", cleanPath);
 
     const state = await getFlowStateIfValid();
@@ -567,13 +652,55 @@
   }
 
   // 渲染/重绘 高亮框与浮窗气泡
+  let renderRequestToken = 0; // 每次渲染自增，用于让过期的异步iframe探测结果自动作废
+
   function renderGuideUI() {
     cleanupUI();
+    renderRequestToken++;
+    const myToken = renderRequestToken;
+
     if (!isGuideActive || !activeGuide) return;
 
     const step = activeGuide.steps[currentStepIndex];
     if (!step) return;
 
+    const local = resolveLocalTarget(step);
+    if (local) {
+      usedElements.add(local.element);
+      createHighlightForElement(local.element, step.highlightStyle);
+      renderBubble(step, local.element);
+      return;
+    }
+
+    // 本文档没找到：如果是顶层且页面里确实有iframe，广播去问一次子文档；
+    // 否则（不是顶层，或者顶层但没有iframe）直接判定未找到。
+    // 注：当前只处理单层嵌套，不会让子iframe再往下递归探测自己的子iframe。
+    const iframeEls = IS_TOP_FRAME ? Array.from(document.querySelectorAll("iframe")) : [];
+    if (iframeEls.length === 0) {
+      handleTargetNotFound(step);
+      return;
+    }
+
+    probeChildFrames(step, iframeEls).then((foundIframeEl) => {
+      // 探测是异步的，回来的时候用户可能已经点了下一步/关闭了引导/翻到了别的步骤，
+      // 用token校验一下，过期的结果直接丢弃，不能覆盖当前状态。
+      if (myToken !== renderRequestToken) return;
+      if (!isGuideActive || !activeGuide || activeGuide.steps[currentStepIndex] !== step) return;
+
+      if (foundIframeEl) {
+        // 高亮已经由匹配到目标的那个iframe自己画好了（见文件顶部iframe worker消息处理），
+        // 顶层这里只需要把气泡贴着这个iframe的边界摆放即可，不需要（也没法）自己再画一次高亮。
+        renderBubble(step, foundIframeEl);
+      } else {
+        handleTargetNotFound(step);
+      }
+    });
+  }
+
+  // 只在"当前文档自己的DOM"里找目标元素（不涉及iframe）。
+  // 顶层和iframe worker共用这一份逻辑：顶层用它来处理本页字段，
+  // iframe worker收到顶层探测请求时，也是调用这个函数来判断自己是否有匹配的控件。
+  function resolveLocalTarget(step) {
     let targetElement = null;
     let matchMethod = "精确选择器定位";
     let scorePercent = 100;
@@ -585,7 +712,7 @@
     if (!targetElement) {
       console.log(`[BusinessGuide] 选择器 "${step.selector}" 缺失，正在启动本地语义匹配...`);
       const semanticMatch = findBestSemanticMatch(step);
-      
+
       if (semanticMatch) {
         targetElement = semanticMatch.element;
         step.resolvedSelector = semanticMatch.selector;
@@ -622,47 +749,105 @@
           }
         }
       } else {
+        console.warn("[BusinessGuide] 未能在页面中匹配到符合要求的元素");
         step.resolvedSelector = null;
       }
     } else {
       step.resolvedSelector = step.selector;
     }
 
-    const activeSelector = step.resolvedSelector || step.selector;
+    if (!targetElement) return null;
+    return { element: targetElement, matchMethod, scorePercent };
+  }
 
-    // 目标元素彻底匹配失败（精确selector查不到 + 语义匹配也没找到）：
-    // 不能再假装正常渲染这一步的气泡——那样气泡会悬浮在页面上却没有任何高亮，
-    // 用户根本不知道该操作哪个控件，等于给了一个假的引导。
-    // 这里改为：明确提示"未找到引导入口"，并中断本次渲染（不显示气泡、不高亮）。
-    if (!targetElement) {
-      cleanupUI();
-      showToast(`⚠️ 未找到"${step.title}"对应的页面控件，引导已中断`);
-      isGuideActive = false;
-      activeGuide = null;
-      flowMeta = null;
-      // 注意：不清空跨页流程在storage里的进度。
-      // 匹配失败很可能是页面还没渲染完全这类时序问题，而不是流程本身作废；
-      // 保留进度，方便用户刷新页面或手动重试时能续接回同一步，而不是被迫从头再来。
-      return;
-    }
+  // 顶层专用：向所有直属子iframe广播"帮我找这个步骤的目标元素"，等待第一个回复"找到了"的iframe，
+  // 或者超时（说明没有任何iframe里有匹配的控件）。
+  function probeChildFrames(step, iframeEls) {
+    return new Promise((resolve) => {
+      const requestId = "req_" + Date.now() + "_" + Math.random().toString(36).slice(2);
+      let settled = false;
 
-    if (targetElement) {
-      highlightElement = document.createElement("div");
-      highlightElement.className = "guide-extension-highlight " + "guide-style-" + (step.highlightStyle || "pulse");
-      document.body.appendChild(highlightElement);
+      // 只传纯数据字段，避免把内部运行时状态（如上一次匹配残留的resolvedSelector）带出去
+      const serializedStep = {
+        title: step.title,
+        description: step.description,
+        selector: step.selector,
+        tipPosition: step.tipPosition,
+        highlightStyle: step.highlightStyle,
+      };
 
-      updateHighlightPosition(targetElement);
-      
-      if (window.ResizeObserver) {
-        resizeObserver = new ResizeObserver(() => {
-          updateHighlightPosition(targetElement);
-        });
-        resizeObserver.observe(targetElement);
-        resizeObserver.observe(document.body);
+      function onMessage(event) {
+        const data = event.data;
+        if (!data || data.__appguide !== true || data.type !== "find-result" || data.requestId !== requestId) return;
+        if (!data.found) return; // 没找到的回复不用处理，继续等其它iframe或超时
+        const matchedIframe = iframeEls.find((el) => el.contentWindow === event.source);
+        if (matchedIframe && !settled) {
+          settled = true;
+          window.removeEventListener("message", onMessage);
+          resolve(matchedIframe);
+        }
       }
-    }
+      window.addEventListener("message", onMessage);
 
-    // 进度显示：有跨页flow元信息时用全局步数，兼容没有flowMeta的极端情况（理论上不会发生）
+      iframeEls.forEach((el) => {
+        try {
+          el.contentWindow && el.contentWindow.postMessage(
+            { __appguide: true, type: "find", requestId, step: serializedStep },
+            "*"
+          );
+        } catch (e) {
+          // 极端情况下iframe还没ready/跨域限制，忽略即可，等超时兜底
+        }
+      });
+
+      setTimeout(() => {
+        if (!settled) {
+          settled = true;
+          window.removeEventListener("message", onMessage);
+          resolve(null);
+        }
+      }, IFRAME_PROBE_TIMEOUT_MS);
+    });
+  }
+
+  // 目标元素彻底匹配失败（本文档selector+语义匹配都没找到，iframe里也没找到）：
+  // 不能再假装正常渲染这一步——那样气泡会悬浮在页面上却没有任何高亮，
+  // 用户根本不知道该操作哪个控件，等于给了一个假的引导。
+  // 这里改为：明确提示"未找到引导入口"，并中断本次渲染（不显示气泡、不高亮）。
+  function handleTargetNotFound(step) {
+    console.warn(`[BusinessGuide] 步骤"${step.title}"未能在页面中匹配到目标元素，引导已中断。`);
+    cleanupUI();
+    showToast(`⚠️ 未找到"${step.title}"对应的页面控件，引导已中断`);
+    isGuideActive = false;
+    activeGuide = null;
+    flowMeta = null;
+    // 注意：不清空跨页流程在storage里的进度。
+    // 匹配失败很可能是页面还没渲染完全这类时序问题，而不是流程本身作废；
+    // 保留进度，方便用户刷新页面或手动重试时能续接回同一步，而不是被迫从头再来。
+  }
+
+  // 在当前文档里为一个元素画高亮框。顶层和iframe worker共用——
+  // iframe内部用 position:fixed 天然只相对自己的视口定位，不需要做任何跨frame坐标换算。
+  function createHighlightForElement(element, style) {
+    highlightElement = document.createElement("div");
+    highlightElement.className = "guide-extension-highlight " + "guide-style-" + (style || "pulse");
+    document.body.appendChild(highlightElement);
+
+    updateHighlightPosition(element);
+
+    if (window.ResizeObserver) {
+      resizeObserver = new ResizeObserver(() => {
+        updateHighlightPosition(element);
+      });
+      resizeObserver.observe(element);
+      resizeObserver.observe(document.body);
+    }
+  }
+
+  // 渲染气泡（顶层专用）。anchorElement 可以是本文档里的真实目标元素，
+  // 也可以是"目标其实在某个iframe里"时，用来占位定位的那个 <iframe> 标签本身——
+  // 两种情况气泡的摆放逻辑完全一样，都是贴着 anchorElement 的边界走 positionBubble 那套贴边翻转规则。
+  function renderBubble(step, anchorElement) {
     const globalNum = step.globalStepNumber || (currentStepIndex + 1);
     const totalNum = (flowMeta && flowMeta.totalSteps) || activeGuide.steps.length;
     const isLastStepOnPage = currentStepIndex === activeGuide.steps.length - 1;
@@ -674,7 +859,7 @@
 
     bubbleElement = document.createElement("div");
     bubbleElement.className = "guide-extension-bubble";
-    
+
     bubbleElement.innerHTML = `
       <div class="guide-header">
         <span>🤖 业务合规助手：${activeGuide.title}</span>
@@ -686,13 +871,6 @@
           ${step.title}
         </h3>
         <p class="guide-step-desc">${step.description}</p>
-        <!--
-        <div class="guide-meta" style="margin-top: 8px; font-size: 10px; color: #64748b; border-top: 1px dashed #1e293b; padding-top: 6px;">
-          <div>定位方式: <span style="color: #22d3ee; font-weight: bold;">${matchMethod}</span></div>
-          <div>匹配度: <span style="color: #10b981; font-weight: bold;">${scorePercent}%</span></div>
-          <div style="margin-top: 2px;">目标节点: <code>${activeSelector}</code></div>
-        </div>
-        -->
       </div>
       <div class="guide-footer">
         <span class="guide-progress">进度: ${globalNum} / ${totalNum}</span>
@@ -709,7 +887,7 @@
     document.getElementById("guide-prev-btn").onclick = prevStep;
     document.getElementById("guide-next-btn").onclick = nextStep;
 
-    positionBubble(targetElement, step.tipPosition);
+    positionBubble(anchorElement, step.tipPosition);
   }
 
   function updateHighlightPosition(element) {
@@ -850,6 +1028,18 @@
     }
     bubbleElement = null;
     highlightElement = null;
+
+    // 顶层每次清理UI时，顺带广播给所有子iframe：把你们各自可能画着的高亮也清掉。
+    // 这样即使上一步的目标在某个iframe里，切到下一步/关闭引导时也不会留下一个擦不掉的高亮框。
+    if (IS_TOP_FRAME) {
+      document.querySelectorAll("iframe").forEach((el) => {
+        try {
+          el.contentWindow && el.contentWindow.postMessage({ __appguide: true, type: "clear-highlight" }, "*");
+        } catch (e) {
+          // 跨域/未就绪等情况忽略即可
+        }
+      });
+    }
   }
 
   // 简易通知

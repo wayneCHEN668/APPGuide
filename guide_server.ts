@@ -37,9 +37,8 @@ interface FlowRecord {
 
 // ============================================================
 // 数据访问层
-// 已接入 MySQL 数据库。loadAllFlows() 改为异步，从 appguide 表读取所有记录。
 // steps 列（JSON类型）中存储了 title 和 pages，映射为 FlowRecord。
-// 下面的匹配/分支逻辑不需要改动（仅调用处加了 await）。
+// /api/guide 使用 loadFlowById / loadFlowsByStarturl 按需查询。
 // ============================================================
 
 const pool = mysql.createPool({
@@ -53,9 +52,45 @@ const pool = mysql.createPool({
   connectTimeout: 5000,
 });
 
-async function loadAllFlowsFromDB(): Promise<FlowRecord[] | null> {
+function loadAllFlowsFromFiles(): FlowRecord[] {
+  const flowsDir = path.resolve("api/flows");
+  const files = fs.readdirSync(flowsDir).filter((f: string) => f.endsWith(".json"));
+  return files.map((f: string) => {
+    const raw = JSON.parse(fs.readFileSync(path.join(flowsDir, f), "utf-8"));
+    if (!raw.id) raw.id = path.basename(f, ".json");
+    return raw as FlowRecord;
+  });
+}
+
+async function loadFlowById(id: string): Promise<FlowRecord | null> {
   try {
-    const [rows] = await pool.query("SELECT id, class, subclass, starturl, steps FROM appguide");
+    const [rows] = await pool.query(
+      "SELECT id, class, subclass, starturl, steps FROM appguide WHERE id = ?",
+      [id]
+    );
+    if ((rows as any[]).length === 0) return null;
+    const row = (rows as any[])[0];
+    const stepsData = typeof row.steps === "string" ? JSON.parse(row.steps) : row.steps;
+    return {
+      id: row.id,
+      class: row.class || "",
+      subclass: row.subclass || "",
+      title: stepsData.title || "",
+      starturl: row.starturl,
+      pages: stepsData.pages || [],
+    } as FlowRecord;
+  } catch (err) {
+    console.warn("[guide_server] loadFlowById DB 不可用:", (err as Error).message);
+    return null;
+  }
+}
+
+async function loadFlowsByStarturl(starturl: string): Promise<FlowRecord[] | null> {
+  try {
+    const [rows] = await pool.query(
+      "SELECT id, class, subclass, starturl, steps FROM appguide WHERE starturl = ?",
+      [starturl]
+    );
     return (rows as any[]).map((row) => {
       const stepsData = typeof row.steps === "string" ? JSON.parse(row.steps) : row.steps;
       return {
@@ -68,25 +103,9 @@ async function loadAllFlowsFromDB(): Promise<FlowRecord[] | null> {
       } as FlowRecord;
     });
   } catch (err) {
-    console.warn("[guide_server] DB 不可用，回退到本地 JSON 文件:", (err as Error).message);
+    console.warn("[guide_server] loadFlowsByStarturl DB 不可用:", (err as Error).message);
     return null;
   }
-}
-
-function loadAllFlowsFromFiles(): FlowRecord[] {
-  const flowsDir = path.resolve("api/flows");
-  const files = fs.readdirSync(flowsDir).filter((f: string) => f.endsWith(".json"));
-  return files.map((f: string) => {
-    const raw = JSON.parse(fs.readFileSync(path.join(flowsDir, f), "utf-8"));
-    if (!raw.id) raw.id = path.basename(f, ".json");
-    return raw as FlowRecord;
-  });
-}
-
-async function loadAllFlows(): Promise<FlowRecord[]> {
-  const dbResult = await loadAllFlowsFromDB();
-  if (dbResult !== null) return dbResult;
-  return loadAllFlowsFromFiles();
 }
 
 // ============================================================
@@ -190,19 +209,24 @@ app.use((_req, res, next) => {
 
 app.get("/api/guide", async (req, res) => {
   try {
-    const pathname = typeof req.query.url === "string" ? req.query.url : "";
+    const rawUrl = typeof req.query.url === "string" ? req.query.url : "";
     const inProgressFlowId = typeof req.query.flowId === "string" ? req.query.flowId : "";
 
-    if (!pathname) {
+    if (!rawUrl) {
       res.status(400).json({ success: false, reason: "bad_request", message: "缺少 url 参数。" });
       return;
     }
 
-    const allFlows = await loadAllFlows();
+    const pathname = normalizeUrl(rawUrl);
 
-    // 分支A
+    // 分支A：有进行中的 flowId，按主键查询该条记录
     if (inProgressFlowId) {
-      const currentFlow = allFlows.find((f) => f.id === inProgressFlowId);
+      let currentFlow = await loadFlowById(inProgressFlowId);
+      // DB 不可用时回退本地文件
+      if (currentFlow === null) {
+        const fileFlows = loadAllFlowsFromFiles();
+        currentFlow = fileFlows.find((f) => f.id === inProgressFlowId) || null;
+      }
       if (currentFlow) {
         const resolved = resolvePageInFlow(currentFlow, pathname);
         if (resolved) {
@@ -213,8 +237,14 @@ app.get("/api/guide", async (req, res) => {
       // 没匹配到，不 return，继续往下走分支B
     }
 
-    // 分支B
-    const candidates = allFlows.filter((f) => normalizeUrl(f.starturl) === normalizeUrl(pathname));
+    // 分支B：按 starturl 精准查询
+    let candidates = await loadFlowsByStarturl(rawUrl);
+    // DB 不可用时回退本地文件
+    if (candidates === null) {
+      candidates = loadAllFlowsFromFiles().filter(
+        (f) => normalizeUrl(f.starturl) === pathname
+      );
+    }
 
     if (candidates.length === 0) {
       res.json({ success: false, reason: "not_found", message: "没有找到相应引导指南。" });
@@ -237,7 +267,7 @@ app.get("/api/guide", async (req, res) => {
     // 命中1条
     const resolved = resolvePageInFlow(candidates[0], pathname);
     if (!resolved) {
-      // 理论上starturl应当等于pages[0].url，这里做个兜底
+      // 理论上 starturl 应当等于 pages[0].url，这里做个兜底
       res.json({ success: false, reason: "not_found", message: "没有找到相应引导指南。" });
       return;
     }
@@ -309,6 +339,34 @@ app.get("/api/flows/by-id", async (req, res) => {
     console.error("[guide_server] /api/flows/by-id 处理出错:", err);
     res.status(500).json({ success: false, reason: "server_error", message: "服务端查询数据时出错。" });
   }
+});
+
+// ============================================================
+// GET /rest?method=appguide.flows.xxx  — 兼容生产环境统一入口
+// 将 method 参数映射到对应的 /api/* 路由，方便插件在同一种 URL
+// 格式下切换本地/云端端点。
+// ============================================================
+
+app.get("/rest", async (req, res) => {
+  const method = typeof req.query.method === "string" ? req.query.method : "";
+
+  if (method === "appguide.flows.guide") {
+    // 直接复用 /api/guide 的核心逻辑
+    req.url = `/api/guide?url=${req.query.url || ""}&flowId=${req.query.flowId || ""}`;
+    return app.handle(req, res);
+  }
+
+  if (method === "appguide.flows.bystarturl") {
+    req.url = `/api/flows/by-starturl?starturl=${req.query.starturl || ""}`;
+    return app.handle(req, res);
+  }
+
+  if (method === "appguide.flows.byid") {
+    req.url = `/api/flows/by-id?id=${req.query.id || ""}`;
+    return app.handle(req, res);
+  }
+
+  res.status(400).json({ success: false, reason: "bad_request", message: `未知的 method: ${method}` });
 });
 
 app.listen(PORT, () => {

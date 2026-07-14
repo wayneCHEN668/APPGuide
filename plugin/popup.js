@@ -4,7 +4,7 @@ document.addEventListener("DOMContentLoaded", () => {
   const statusDiv = document.getElementById("status");
 
   // 默认使用云服务器端点（无需协议前缀，background worker 会自动补全）
-  const DEFAULT_URL = "81.69.17.148:3010";
+  const DEFAULT_URL = "api.skillcloud.cn";
 
   // 加载已有配置
   chrome.storage.local.get(["apiBaseUrl"], (result) => {
