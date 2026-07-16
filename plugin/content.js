@@ -45,6 +45,29 @@
 
   // 注：API 地址由 popup 配置并存储在 chrome.storage，实际 fetch 由 background worker 代理执行
 
+  // 给 window.__appguideDebug 加个setter：赋值时顺手写入localStorage，
+  // 这样在控制台执行一次 window.__appguideDebug = true 之后，哪怕接下来页面刷新/跳转，
+  // 调试开关依然保持开启，不用每次都重新设置一遍（尤其是自动续接这种页面一加载就立刻触发匹配的场景，
+  // 手动设置openLog的手速根本追不上）。
+  try {
+    Object.defineProperty(window, "__appguideDebug", {
+      configurable: true,
+      get() {
+        try { return localStorage.getItem("__appguideDebug") === "1"; } catch (e) { return false; }
+      },
+      set(val) {
+        try {
+          if (val) localStorage.setItem("__appguideDebug", "1");
+          else localStorage.removeItem("__appguideDebug");
+        } catch (e) {
+          // localStorage不可用（极少数受限环境），静默忽略，退回当次页面临时生效
+        }
+      },
+    });
+  } catch (e) {
+    // 极少数情况下defineProperty失败，不影响主流程
+  }
+
   console.log(
     IS_TOP_FRAME
       ? "[BusinessGuide] 插件内容脚本已成功注入目标系统（顶层）。支持高级本地语义模糊匹配 + 跨页流程续接 + iframe内控件探测。"
@@ -226,21 +249,62 @@
   }
 
   // 扫描当前页面真实的 DOM 树
+  // 判断一个元素是不是"看起来像标签文字"——不管它是 <label>、<h3>、<div> 还是 <span>，
+  // 不依赖具体标签名或class命名习惯，只看内容特征：
+  // 有文字、文字不长（真正的字段标签都是短词，不会是大段说明文字）、
+  // 自己内部不再装着别的可交互控件（避免把"标签+按钮"的整个容器误当成纯标签）。
+  function looksLikeLabelText(el) {
+    if (!el || !el.tagName) return false;
+    const tag = el.tagName.toLowerCase();
+    if (tag === "input" || tag === "select" || tag === "textarea" || tag === "button" ||
+        tag === "a" || tag === "svg" || tag === "img") {
+      return false;
+    }
+    const text = (el.textContent || "").trim();
+    if (!text || text.length > 20) return false;
+    if (el.querySelector && el.querySelector("input, select, textarea, button, a, [role='button'], [tabindex]")) {
+      return false;
+    }
+    return true;
+  }
+
   function scanDOM() {
     const list = [];
-    // 查找页面中所有的可交互控件
-    const elements = document.querySelectorAll("input, select, textarea, button, a, [role='button'], div[class*='submit'], div[class*='btn'], div[class*='Btn'], [class*='submit-btn']");
-    
-    elements.forEach(el => {
+    const seen = new Set(); // 避免同一个元素被下面多个层级重复收录
+
+    function pushCandidate(el) {
+      if (seen.has(el)) return;
+      seen.add(el);
+
+      // 排除真正"没有被渲染出来/看不见"的元素：
+      // display:none / visibility:hidden / opacity:0，或者干脆尺寸就是0×0（空盒子）。
+      // 注意：零尺寸这条专门给 <input> 标签留了豁免——文件上传等场景常见"隐藏input+可见父容器"
+      // 的写法，input本身可能就是设计成0宽高，这种合法场景后面resolveLocalTarget里有专门的
+      // "零尺寸input升级到可见父容器"逻辑处理。其它标签（尤其是div/span这类新增的候选来源）
+      // 如果尺寸是0，就是真的看不见摸不着，没有理由被选中。
+      try {
+        const cs = getComputedStyle(el);
+        if (cs.display === "none" || cs.visibility === "hidden" || parseFloat(cs.opacity) === 0) {
+          return;
+        }
+        if (el.tagName.toLowerCase() !== "input") {
+          const rect = el.getBoundingClientRect();
+          if (rect.width === 0 && rect.height === 0) {
+            return;
+          }
+        }
+      } catch (e) {
+        // 计算样式失败（极少数情况，比如元素已从DOM分离），不因此排除
+      }
+
       const id = el.id || "";
       const tagName = el.tagName.toLowerCase();
-      const type = el.type || "";
       const placeholder = el.placeholder || "";
-      const className = el.className || "";
+      const className = (typeof el.className === "string") ? el.className : "";
       const ariaLabel = el.getAttribute("aria-label") || "";
       const textContent = el.textContent ? el.textContent.trim() : "";
-      
-      // 寻找对应的 Label 标签
+
+      // 寻找对应的 Label 文字
       let labelText = "";
       if (id) {
         const labelEl = document.querySelector(`label[for="${id}"]`);
@@ -248,21 +312,15 @@
           labelText = labelEl.textContent || "";
         }
       }
-      
+
       if (!labelText) {
-        // Element Plus / 自定义 UI: 查找 .selectLabel 兄弟元素，
-        // 或者更标准的 <label> 标签兄弟元素（哪怕它没有 for 属性）——
-        // 后者是更通用的写法，不同页面/不同组件库可能用其中任意一种。
+        // 往上最多找6层，每层检查前面的兄弟节点是不是"看起来像标签文字"
         let scanEl = el;
         for (let level = 0; level < 6 && !labelText && scanEl; level++) {
           let prev = scanEl.previousElementSibling;
           while (prev) {
-            if (prev.classList && prev.classList.contains('selectLabel')) {
-              labelText = (prev.textContent || '').trim();
-              break;
-            }
-            if (prev.tagName && prev.tagName.toLowerCase() === 'label') {
-              labelText = (prev.textContent || '').trim();
+            if (looksLikeLabelText(prev)) {
+              labelText = (prev.textContent || "").trim();
               break;
             }
             prev = prev.previousElementSibling;
@@ -274,8 +332,8 @@
       if (!labelText) {
         if (tagName === "button" || tagName === "a" || el.getAttribute("role") === "button") {
           labelText = textContent;
-        } else if (tagName === "div" && textContent && textContent.length < 30) {
-          // 类按钮 div（如"创建任务"），优先用自身文本
+        } else if ((tagName === "div" || tagName === "span" || tagName === "p" || /^h[3-6]$/.test(tagName)) && textContent && textContent.length < 30) {
+          // 类按钮容器（如"创建任务"/"创建一个语料库"）及标题元素，优先用自身文本
           labelText = textContent;
         } else {
           // 向上找父节点容器中的关联文本
@@ -316,6 +374,54 @@
           type: tagName
         });
       }
+    }
+
+    // 第1层：原有的标签+关键词选择器，最常见、最便宜，优先扫
+    document.querySelectorAll(
+      "input, select, textarea, button, a, [role='button'], div[class*='submit'], div[class*='btn'], div[class*='Btn'], [class*='submit-btn'], h3, h4, h5, h6, div[class*='switch']"
+    ).forEach(pushCandidate);
+
+    // 第2层：有 tabindex 或标准 ARIA 交互 role 的元素——
+    // 这是无障碍开发规范里的信号，不依赖类名怎么起，覆盖"自定义组件但按规范做了无障碍标注"的情况
+    const INTERACTIVE_ROLES = ["button", "combobox", "listbox", "menuitem", "tab", "checkbox", "radio", "switch", "option"];
+    document.querySelectorAll("[tabindex], [role]").forEach(el => {
+      if (seen.has(el)) return;
+      const role = el.getAttribute("role");
+      if (el.hasAttribute("tabindex") || (role && INTERACTIVE_ROLES.includes(role))) {
+        pushCandidate(el);
+      }
+    });
+
+    // 第3层："图标+短文本"结构模式——自定义下拉框/按钮很常见的长相
+    // （比如 <div><p>舞蹈</p><svg>▼</svg></div> 这种，不依赖class命名）。
+    // 开销可控：只看有没有svg/img子节点+文字长度，不涉及样式计算。
+    document.querySelectorAll("div, span, p").forEach(el => {
+      if (seen.has(el)) return;
+      // 内部已经有真正的表单控件/链接了，说明这一层是容器而不是控件本身，不重复收录
+      if (el.querySelector("input, select, textarea, button, a[href]")) return;
+      const text = (el.textContent || "").trim();
+      if (!text || text.length > 30) return;
+      if (!el.querySelector("svg, img")) return;
+      // 容器太复杂（子节点太多）大概率是一大块区域而不是一个独立控件，跳过避免整块被误当成按钮
+      if (el.querySelectorAll("*").length > 15) return;
+      pushCandidate(el);
+    });
+
+    // 第4层：cursor:pointer 兜底——开销最大，放最后，且只对已经"文字+结构都比较像"的元素才计算样式，
+    // 不会对全页面所有div暴力调用getComputedStyle。
+    document.querySelectorAll("div, span, p").forEach(el => {
+      if (seen.has(el)) return;
+      if (el.querySelector("input, select, textarea, button, a[href]")) return;
+      const text = (el.textContent || "").trim();
+      if (!text || text.length > 30) return;
+      if (el.querySelectorAll("*").length > 10) return;
+      try {
+        if (getComputedStyle(el).cursor === "pointer") {
+          pushCandidate(el);
+        }
+      } catch (e) {
+        // 极少数情况下getComputedStyle会抛错（比如元素已经从DOM里被移除），忽略即可
+      }
     });
 
     return list;
@@ -337,6 +443,8 @@
     // 打印详细的候选打分过程；执行 window.__appguideDebug = false 关闭。
     // （之前这里是写死 step.title === "上传PPT文件" 只能调试固定的某一步，现在改成运行时开关，
     // 不用改代码就能对任意一步开启，包括iframe worker里也认这个开关）
+    // window.__appguideDebug 现在是个读写localStorage的属性（见文件顶部defineProperty），
+    // 这里直接读取即可，不用再单独处理持久化逻辑。
     const isDebug = !!window.__appguideDebug;
     if (isDebug) {
       console.log("[DEBUG] === 匹配步骤:", step.title, "===", IS_TOP_FRAME ? "(顶层文档)" : "(iframe worker: " + window.location.href + ")");
@@ -745,6 +853,19 @@
         matchMethod = `语义模糊对齐 [${semanticMatch.label}]`;
         scorePercent = Math.round(semanticMatch.score * 100);
         console.log(`[BusinessGuide] 语义对齐成功！绑定到 "${semanticMatch.selector}"，置信度 ${scorePercent}%`);
+        try {
+          const rect = targetElement.getBoundingClientRect();
+          const cs = getComputedStyle(targetElement);
+          console.log(
+            `[BusinessGuide] 匹配元素详情 —— 位置:(${Math.round(rect.left)},${Math.round(rect.top)}) ` +
+            `尺寸:${Math.round(rect.width)}×${Math.round(rect.height)} ` +
+            `display:${cs.display} visibility:${cs.visibility} opacity:${cs.opacity}` +
+            (rect.width === 0 || rect.height === 0 ? " ⚠️ 尺寸为0，可能是不可见元素" : ""),
+            targetElement
+          );
+        } catch (e) {
+          // 诊断信息获取失败不影响主流程
+        }
 
         // 升级隐藏/零尺寸 input 为可交互父容器
         if (targetElement && targetElement.tagName === 'INPUT') {
