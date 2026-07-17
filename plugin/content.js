@@ -455,10 +455,12 @@
     }
 
     // 策略0: 完整标题匹配 (最高优先级)
+    // clickText 优先：如果步骤配置了按钮上的确切文本，用 clickText 比对；否则回退到 title
     // 比较前去掉双方的非文字符号（如 *、#、- 等），避免因格式差异导致相等匹配失败
+    const matchText = step.clickText || step.title;
     const stripSymbols = (str) => str.replace(/[^\w\u4e00-\u9fff\s]/g, '').replace(/\s+/g, ' ').trim();
-    const normalizedTitle = stripSymbols(step.title);
-    if (isDebug) console.log("[DEBUG] S0 完整标题匹配: step.title =", JSON.stringify(step.title), "normalized =", JSON.stringify(normalizedTitle));
+    const normalizedTitle = stripSymbols(matchText);
+    if (isDebug) console.log("[DEBUG] S0 完整标题匹配: matchText =", JSON.stringify(matchText), "(来源:", step.clickText ? "clickText" : "title", ")", "normalized =", JSON.stringify(normalizedTitle));
     const s0Matches = [];
     for (const item of scanned) {
       const normalizedLabel = stripSymbols(item.label);
@@ -479,7 +481,7 @@
     if (isDebug) console.log("[DEBUG] S0 未命中，进入S1");
 
     // 策略1: 标题关键词子串匹配 (高置信度)
-    const titleChars = step.title.replace(/^(设置|选择|找到|点击|上传|提交)/, '').trim();
+    const titleChars = matchText.replace(/^(设置|选择|找到|点击|上传|提交|填写|添加)/, '').trim();
     if (isDebug) console.log("[DEBUG] S1 关键词:", JSON.stringify(titleChars));
     const s1Matches = [];
     for (const item of scanned) {
@@ -506,7 +508,7 @@
     let s2Top = [];
     const s2Matches = [];
     for (const item of scanned) {
-      const titleSet = new Set(step.title.replace(/\s/g, '').split(''));
+      const titleSet = new Set(matchText.replace(/\s/g, '').split(''));
       const labelSet = new Set(item.label.replace(/\s/g, '').split(''));
       const overlap = [...titleSet].filter(c => labelSet.has(c)).length;
       const titleOverlap = overlap / titleSet.size;
@@ -532,7 +534,7 @@
     if (isDebug) console.log("[DEBUG] S2 未命中 (bestOverlap>=0.5)。高重叠候选:", s2Top.sort((a,b) => parseFloat(b.best)-parseFloat(a.best)).slice(0,5));
 
     // 策略3: 加权 TF 余弦相似度 (标题3份 + 描述1份)
-    const query = step.title + " " + step.title + " " + step.title + " " + step.description;
+    const query = matchText + " " + matchText + " " + matchText + " " + step.description;
     let highestScore = 0;
     let bestCandidates = []; // 记录并列最高分的所有候选（重复label场景下，分数会完全相等）
     let s3Top = [];
@@ -608,36 +610,54 @@
   // 读取跨页流程运行时状态，并做TTL过期判断（过期则顺手清空，返回null）
   function getFlowStateIfValid() {
     return new Promise((resolve) => {
-      chrome.storage.local.get([FLOW_STATE_KEY], (result) => {
-        const state = result[FLOW_STATE_KEY];
-        if (!state) {
-          resolve(null);
-          return;
-        }
-        if (Date.now() - state.lastActiveAt > FLOW_TTL_MS) {
-          chrome.storage.local.remove(FLOW_STATE_KEY);
-          resolve(null);
-          return;
-        }
-        resolve(state);
-      });
+      try {
+        chrome.storage.local.get([FLOW_STATE_KEY], (result) => {
+          if (chrome.runtime.lastError) {
+            console.warn("[BusinessGuide] 读取流程状态失败:", chrome.runtime.lastError.message);
+            resolve(null);
+            return;
+          }
+          const state = result[FLOW_STATE_KEY];
+          if (!state) {
+            resolve(null);
+            return;
+          }
+          if (Date.now() - state.lastActiveAt > FLOW_TTL_MS) {
+            try { chrome.storage.local.remove(FLOW_STATE_KEY); } catch (e) { /* 静默 */ }
+            resolve(null);
+            return;
+          }
+          resolve(state);
+        });
+      } catch (e) {
+        console.warn("[BusinessGuide] chrome.storage 不可用（扩展上下文已失效）:", e.message);
+        resolve(null);
+      }
     });
   }
 
   // 记录"接下来应该显示第几步"（globalStepNumber），每次渲染/翻页都要调用
   function persistFlowState(nextGlobalStepNumber) {
     if (!flowMeta) return;
-    chrome.storage.local.set({
-      [FLOW_STATE_KEY]: {
-        flowId: flowMeta.flowId,
-        globalStepNumber: nextGlobalStepNumber,
-        lastActiveAt: Date.now(),
-      },
-    });
+    try {
+      chrome.storage.local.set({
+        [FLOW_STATE_KEY]: {
+          flowId: flowMeta.flowId,
+          globalStepNumber: nextGlobalStepNumber,
+          lastActiveAt: Date.now(),
+        },
+      });
+    } catch (e) {
+      console.warn("[BusinessGuide] 保存流程状态失败（扩展上下文已失效）:", e.message);
+    }
   }
 
   function clearFlowState() {
-    chrome.storage.local.remove(FLOW_STATE_KEY);
+    try {
+      chrome.storage.local.remove(FLOW_STATE_KEY);
+    } catch (e) {
+      console.warn("[BusinessGuide] 清除流程状态失败（扩展上下文已失效）:", e.message);
+    }
   }
 
   // 核心功能：开关引导（用户手动按 Alt+G 触发）
