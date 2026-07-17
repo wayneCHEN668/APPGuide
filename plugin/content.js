@@ -282,12 +282,15 @@
       // 的写法，input本身可能就是设计成0宽高，这种合法场景后面resolveLocalTarget里有专门的
       // "零尺寸input升级到可见父容器"逻辑处理。其它标签（尤其是div/span这类新增的候选来源）
       // 如果尺寸是0，就是真的看不见摸不着，没有理由被选中。
+      // <button> 和 <a> 也豁免 display:none 检查：侧边栏折叠等场景下按钮/链接仍是有意义的引导目标。
       try {
         const cs = getComputedStyle(el);
-        if (cs.display === "none" || cs.visibility === "hidden" || parseFloat(cs.opacity) === 0) {
+        const tag = el.tagName.toLowerCase();
+        const isHiddenByStyle = cs.display === "none" || cs.visibility === "hidden" || parseFloat(cs.opacity) === 0;
+        if (isHiddenByStyle && tag !== "button" && tag !== "a") {
           return;
         }
-        if (el.tagName.toLowerCase() !== "input") {
+        if (tag !== "input") {
           const rect = el.getBoundingClientRect();
           if (rect.width === 0 && rect.height === 0) {
             return;
