@@ -218,9 +218,9 @@
 /* ------------------ 通知小吐司 ------------------ */
 .guide-extension-toast {
   position: fixed;
-  bottom: -60px;
+  top: 50%;
   left: 50%;
-  transform: translateX(-50%);
+  transform: translate(-50%, -50%);
   z-index: 10000001;
   background-color: #1e293b;
   border: 1px solid #3b82f6;
@@ -230,9 +230,12 @@
   font-size: 12px;
   font-weight: 500;
   box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.3);
-  transition: bottom 0.3s cubic-bezier(0.18, 0.89, 0.32, 1.28);
+  opacity: 0;
+  scale: 0.9;
+  transition: opacity 0.3s ease, scale 0.3s cubic-bezier(0.18, 0.89, 0.32, 1.28);
 }
 
 .guide-extension-toast.show {
-  bottom: 30px;
+  opacity: 1;
+  scale: 1;
 }

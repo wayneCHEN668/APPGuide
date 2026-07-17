@@ -683,7 +683,7 @@
       handleGuideApiResult(data, cleanPath, state, true);
     } catch (e) {
       console.error("[BusinessGuide] 无法连接到 API 配置端点:", e);
-      showToast("❌ 业务指南 API 端点连接失败");
+      showToast("❌ 业务指南网络服务端点连接失败");
     }
   }
 
@@ -692,7 +692,7 @@
   // manual=false 表示这是页面加载时的被动自动检测，只在 resume 时才动作，其余情况保持安静。
   function handleGuideApiResult(data, cleanPath, state, manual) {
     if (!data) {
-      if (manual) showToast("❌ 业务指南 API 端点连接失败");
+      if (manual) showToast("❌ 业务指南网络服务端点连接失败");
       return;
     }
 
@@ -712,10 +712,10 @@
       return;
     }
     if (!data.success && data.reason === "not_found") {
-      showToast("💡 " + (data.message || "当前页面未配置特定的业务操作指南 API"));
+      showToast("💡 " + (data.message || "当前页面未配置特定的业务操作指南入口"));
       return;
     }
-    showToast("❌ 业务指南 API 端点连接失败");
+    showToast("❌ 业务指南网络服务端点连接失败");
   }
 
   // 根据 /api/guide 返回的已解析页面数据，启动/续接引导渲染
@@ -793,7 +793,7 @@
           handleGuideApiResult(data, cleanPath, null, true);
         } catch (e) {
           console.error("[BusinessGuide] 选择流程后拉取指南失败:", e);
-          showToast("❌ 业务指南 API 端点连接失败");
+          showToast("❌ 具体业务指南获取失败");
         }
       };
     });
