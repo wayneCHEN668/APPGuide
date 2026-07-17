@@ -317,6 +317,14 @@
       }
 
       if (!labelText) {
+        // <button> 和 <a> 是自标注元素，优先使用自身文本作为标签；
+        // 只有自身无文本（如图标按钮）时才走后续的向上查找逻辑
+        if ((tagName === "button" || tagName === "a" || el.getAttribute("role") === "button") && textContent) {
+          labelText = textContent;
+        }
+      }
+
+      if (!labelText) {
         // 往上最多找6层，每层检查前面的兄弟节点是不是"看起来像标签文字"
         let scanEl = el;
         for (let level = 0; level < 6 && !labelText && scanEl; level++) {
