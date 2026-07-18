@@ -278,22 +278,27 @@
 
       // 排除真正"没有被渲染出来/看不见"的元素：
       // display:none / visibility:hidden / opacity:0，或者干脆尺寸就是0×0（空盒子）。
-      // 注意：零尺寸这条专门给 <input> 标签留了豁免——文件上传等场景常见"隐藏input+可见父容器"
-      // 的写法，input本身可能就是设计成0宽高，这种合法场景后面resolveLocalTarget里有专门的
-      // "零尺寸input升级到可见父容器"逻辑处理。其它标签（尤其是div/span这类新增的候选来源）
-      // 如果尺寸是0，就是真的看不见摸不着，没有理由被选中。
-      // <button> 和 <a> 也豁免 display:none 检查：侧边栏折叠等场景下按钮/链接仍是有意义的引导目标。
+      // input 零尺寸豁免是有条件的：只对"自身0×0但父容器正常尺寸"的 input
+      // （典型如 file upload 的隐藏 input + 可见父容器）保留豁免；
+      // 如果父容器也 0×0，说明整个组件都处于收起/隐藏态，不应进候选池。
       try {
         const cs = getComputedStyle(el);
         const tag = el.tagName.toLowerCase();
         const isHiddenByStyle = cs.display === "none" || cs.visibility === "hidden" || parseFloat(cs.opacity) === 0;
-        if (isHiddenByStyle && tag !== "button" && tag !== "a") {
+        if (isHiddenByStyle) {
           return;
         }
-        if (tag !== "input") {
-          const rect = el.getBoundingClientRect();
-          if (rect.width === 0 && rect.height === 0) {
+        const rect = el.getBoundingClientRect();
+        if (rect.width === 0 && rect.height === 0) {
+          if (tag !== "input") {
             return;
+          }
+          const parent = el.parentElement;
+          if (parent) {
+            const pr = parent.getBoundingClientRect();
+            if (pr.width === 0 && pr.height === 0) {
+              return;
+            }
           }
         }
       } catch (e) {
@@ -389,7 +394,7 @@
 
     // 第1层：原有的标签+关键词选择器，最常见、最便宜，优先扫
     document.querySelectorAll(
-      "input, select, textarea, button, a, [role='button'], div[class*='submit'], div[class*='btn'], div[class*='Btn'], [class*='submit-btn'], h3, h4, h5, h6, div[class*='switch']"
+      "input, select, textarea, button, a, [role='button'], div[class*='submit'], div[class*='btn'], div[class*='Btn'], [class*='submit-btn'], div[class*='switch']"
     ).forEach(pushCandidate);
 
     // 第2层：有 tabindex 或标准 ARIA 交互 role 的元素——
@@ -418,13 +423,20 @@
       pushCandidate(el);
     });
 
-    // 第4层：cursor:pointer 兜底——开销最大，放最后，且只对已经"文字+结构都比较像"的元素才计算样式，
+    // 第4层：cursor:pointer 兜底——开销最大，放最后，且只对已经"结构上比较像"的元素才计算样式，
     // 不会对全页面所有div暴力调用getComputedStyle。
-    document.querySelectorAll("div, span, p").forEach(el => {
+    // 注意：这里不要求元素自身必须有文字——像开关(toggle switch)这类控件，
+    // 本身通常是纯CSS画出来的空容器（没有文字也没有图标），完全靠旁边的字段标签
+    // （走前面label推导那套sibling-walk逻辑）才能关联上语义。如果这里卡"必须有自身文字"，
+    // 这类控件永远进不了候选池。
+    // h3-h6也放在这一层：标题标签本身不代表"可交互"（不像button/input/a那样天然可交互），
+    // 有没有点击行为完全看有没有设cursor:pointer——不能像真正的表单控件那样无条件收录，
+    // 否则会跟旁边真正的控件（比如这次的开关）打平手，抢了不该抢的匹配。
+    document.querySelectorAll("div, span, p, h3, h4, h5, h6").forEach(el => {
       if (seen.has(el)) return;
       if (el.querySelector("input, select, textarea, button, a[href]")) return;
       const text = (el.textContent || "").trim();
-      if (!text || text.length > 30) return;
+      if (text.length > 30) return; // 自身文字太长（一大段说明文字）大概率不是单个控件，跳过
       if (el.querySelectorAll("*").length > 10) return;
       try {
         if (getComputedStyle(el).cursor === "pointer") {
@@ -440,9 +452,19 @@
 
   // 从一组"打分相同"的候选里，优先挑一个本次页面还没被别的步骤用过的；
   // 如果全都用过了（大概率是想回头再强调同一个元素），就退回原来的行为——选第一个。
+  // 从一组"打分相同"的候选里做二次筛选：
+  // 1) 优先只保留"最精确"的那些——如果A是B的外层容器（A.contains(B)），
+  //    候选里同时出现A和B时，只保留B（更具体、更贴近真正要操作的控件，
+  //    不要选中一个大容器，哪怕它文字上也对得上）。
+  // 2) 在这批精确候选里，再优先挑一个本次页面还没被别的步骤用过的；
+  //    如果全都用过了（大概率是想回头再强调同一个元素），就退回原来的行为——选第一个。
   function pickPreferUnused(items) {
-    const unused = items.find((it) => !usedElements.has(it.element));
-    return unused || items[0];
+    const mostSpecific = items.filter((it) =>
+      !items.some((other) => other !== it && it.element.contains(other.element))
+    );
+    const pool = mostSpecific.length > 0 ? mostSpecific : items;
+    const unused = pool.find((it) => !usedElements.has(it.element));
+    return unused || pool[0];
   }
 
   // 对特定步骤指南执行本地语义匹配，返回最匹配的页面 DOM 元素
@@ -469,7 +491,7 @@
     // clickText 优先：如果步骤配置了按钮上的确切文本，用 clickText 比对；否则回退到 title
     // 比较前去掉双方的非文字符号（如 *、#、- 等），避免因格式差异导致相等匹配失败
     const matchText = step.clickText || step.title;
-    const stripSymbols = (str) => str.replace(/[^\w\u4e00-\u9fff\s]/g, '').replace(/\s+/g, ' ').trim();
+    const stripSymbols = (str) => str.replace(/[^\w\u4e00-\u9fff\s]/g, '').replace(/(?:一个|一下|一份|一次)/g, '').replace(/\s+/g, ' ').trim();    
     const normalizedTitle = stripSymbols(matchText);
     if (isDebug) console.log("[DEBUG] S0 完整标题匹配: matchText =", JSON.stringify(matchText), "(来源:", step.clickText ? "clickText" : "title", ")", "normalized =", JSON.stringify(normalizedTitle));
     const s0Matches = [];
@@ -766,7 +788,7 @@
     bubbleElement.className = "guide-extension-bubble";
     bubbleElement.innerHTML = `
       <div class="guide-header">
-        <span>🤖 业务合规助手</span>
+        <span>🤖 业务流程引导助手</span>
         <button id="guide-close-btn" class="guide-btn-close">×</button>
       </div>
       <div class="guide-body">
