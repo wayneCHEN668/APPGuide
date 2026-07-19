@@ -514,13 +514,13 @@
     if (isDebug) console.log("[DEBUG] S0 未命中，进入S1");
 
     // 策略1: 标题关键词子串匹配 (高置信度)
-    const titleChars = matchText.replace(/^(设置|选择|找到|点击|上传|提交|填写|添加|输入)/, '').trim();
+    const titleChars = matchText.replace(/^(设置|选择|找到|点击|上传|提交|填写|添加|输入|创建)/, '').trim();
     if (isDebug) console.log("[DEBUG] S1 关键词:", JSON.stringify(titleChars));
     const s1Matches = [];
     for (const item of scanned) {
       const labelInTitle = titleChars.length >= 2 && item.label.includes(titleChars);
-      const labelInDesc = item.label.length >= 2 && step.description.includes(titleChars);
-      if (labelInTitle || labelInDesc) {
+      //const labelInDesc = item.label.length >= 2 && step.description.includes(item.label);
+      if (labelInTitle ) {
         s1Matches.push(item);
       }
     }
