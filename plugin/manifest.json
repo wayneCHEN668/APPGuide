@@ -1,6 +1,6 @@
 {
   "manifest_version": 3,
-  "name": "悟梓企业业务流步骤合规引导系统",
+  "name": "智导业务操作领航",
   "version": "1.0.0",
   "description": "实时解析复杂行业系统中的输入焦点与URL，动态加载对应业务指南，步骤化高亮引导规范操作。",
   "permissions": [
@@ -24,7 +24,11 @@
     }
   ],
   "action": {
-    "default_popup": "popup.html"
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon_16x16.png",
+      "32": "icons/icon_32x32.png"
+    }
   },
   "commands": {
     "toggle-guide": {
@@ -34,5 +38,16 @@
       },
       "description": "呼出/关闭当前业务操作引导流程"
     }
-  }
+  },
+  "icons": {
+    "16": "icons/icon_16x16.png",
+    "48": "icons/icon_48x48.png",
+    "128": "icons/icon_128x128.png"
+  },
+  "web_accessible_resources": [
+    {
+      "resources": ["icons/icon_16x16.png"],
+      "matches": ["<all_urls>"]
+    }
+  ]
 }

@@ -88,7 +88,7 @@ async function loadFlowById(id: string): Promise<FlowRecord | null> {
 async function loadFlowsByStarturl(starturl: string): Promise<FlowRecord[] | null> {
   try {
     const [rows] = await pool.query(
-      "SELECT id, class, subclass, starturl, steps FROM appguide WHERE starturl = ?",
+      "SELECT id, class, subclass, starturl, steps FROM appguide WHERE starturl LIKE ?",
       [starturl]
     );
     return (rows as any[]).map((row) => {
@@ -290,7 +290,7 @@ app.get("/api/flows/by-starturl", async (req, res) => {
       res.status(400).json({ success: false, reason: "bad_request", message: "缺少 starturl 参数。" });
       return;
     }
-    const [rows] = await pool.query("SELECT * FROM appguide WHERE starturl = ?", [starturl]);
+    const [rows] = await pool.query("SELECT * FROM appguide WHERE starturl LIKE ?", [starturl]);
     const results = (rows as any[]).map((row) => ({
       id: row.id,
       class: row.class,
