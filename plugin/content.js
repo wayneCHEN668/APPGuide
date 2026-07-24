@@ -39,7 +39,7 @@
   const IFRAME_PROBE_TIMEOUT_MS = 800;
 
   // 气泡标题栏图标（需在 manifest.json 的 web_accessible_resources 中声明）
-  const ICON_URL = chrome.runtime.getURL("icons/icon_16x16.png");
+  const ICON_URL = chrome.runtime.getURL("icons/icon_16t.png");
 
   // 跨页流程运行时状态：存在 chrome.storage.local，仅记录"进行到哪一步了"，
   // 不存具体steps内容（那些每次都从API重新拉取，保证内容永远最新）
@@ -825,7 +825,7 @@
     bubbleElement.className = "guide-extension-bubble";
     bubbleElement.innerHTML = `
       <div class="guide-header">
-        <span><img src="${ICON_URL}" style="width:20px;height:20px;vertical-align:middle;margin-right:6px;">智导业务操作领航</span>
+        <span><img src="${ICON_URL}" style="width:16px;height:16px;vertical-align:middle;margin-right:6px;">智导业务操作领航</span>
         <button id="guide-close-btn" class="guide-btn-close">×</button>
       </div>
       <div class="guide-body">
@@ -1236,7 +1236,7 @@
 
     bubbleElement.innerHTML = `
       <div class="guide-header">
-        <span><img src="${ICON_URL}" style="width:20px;height:20px;vertical-align:middle;margin-right:6px;">智导业务操作领航：${activeGuide.title}</span>
+        <span><img src="${ICON_URL}" style="width:16px;height:16px;vertical-align:middle;margin-right:6px;">智导业务操作领航：${activeGuide.title}</span>
         <button id="guide-close-btn" class="guide-btn-close">×</button>
       </div>
       <div class="guide-body">
