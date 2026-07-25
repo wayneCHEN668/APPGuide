@@ -366,6 +366,17 @@
       // 清理过多换行和冗余空白
       labelText = labelText.replace(/\s+/g, " ").substring(0, 100);
 
+      // aria-label 兜底：纯图标按钮（如侧边栏展开/收起）通常只有 aria-label 作为
+      // 唯一可识别的文本标签，但上面那套 sibling/parent walk 拿不到它——因为
+      // aria-label 不是可见文本节点，只能通过 getAttribute 获取。
+      // 这里如果 labelText 还为空就用 ariaLabel；如果不为空但不包含 ariaLabel
+      // （说明 sibling walk 拿到的只是附近无关文字），就把 ariaLabel 前置优先。
+      if (!labelText && ariaLabel) {
+        labelText = ariaLabel;
+      } else if (labelText && ariaLabel && !labelText.includes(ariaLabel)) {
+        labelText = ariaLabel + " " + labelText;
+      }
+
       // 自动构建可用的 CSS 选择器
       let selector = "";
       if (id) {
@@ -397,7 +408,7 @@
 
     // 第1层：原有的标签+关键词选择器，最常见、最便宜，优先扫
     document.querySelectorAll(
-      "input, select, textarea, button, a, [role='button'], div[class*='submit'], div[class*='btn'], div[class*='Btn'], [class*='submit-btn'], div[class*='switch']"
+      "input, select, textarea, button, a, [role='button'], div[class*='submit'], div[class*='btn'], div[class*='Btn'], [class*='submit-btn'], div[class*='switch'], div[class*='icon-button']"
     ).forEach(pushCandidate);
 
     // 第2层：有 tabindex 或标准 ARIA 交互 role 的元素——
@@ -493,7 +504,11 @@
     // 策略0: 完整标题匹配 (最高优先级)
     // clickText 优先：如果步骤配置了按钮上的确切文本，用 clickText 比对；否则回退到 title
     // 比较前去掉双方的非文字符号（如 *、#、- 等），避免因格式差异导致相等匹配失败
-    const matchText = step.clickText || step.title;
+    const rawText = step.clickText || step.title;
+    // 取第一个空格前的内容作为精确匹配文本：标题如"展开导航 侧边栏"只匹配"展开导航"，
+    // 避免标题里附带的位置/分类说明（空格后面的部分）干扰精确匹配。
+    const spaceIdx = rawText.indexOf(" ");
+    const matchText = spaceIdx > 0 ? rawText.substring(0, spaceIdx) : rawText;
     const stripSymbols = (str) => str.replace(/[^\w\u4e00-\u9fff\s]/g, '').replace(/(?:一个|一下|一份|一次)/g, '').replace(/\s+/g, ' ').trim();    
     const normalizedTitle = stripSymbols(matchText);
     if (isDebug) console.log("[DEBUG] S0 完整标题匹配: matchText =", JSON.stringify(matchText), "(来源:", step.clickText ? "clickText" : "title", ")", "normalized =", JSON.stringify(normalizedTitle));
@@ -648,13 +663,12 @@
 
   // 通过 background worker 代理请求 /api/guide，绕过 HTTPS 页面的 Mixed Content 限制。
   // flowId 传入当前进行中的流程id（没有则不传），供服务端做分支A/B判定。
-  // url 包裹 % 通配符以支持服务端 SQL LIKE 模糊匹配，兼容 DB 中 starturl 格式不统一的情况。
+  // 直接传原始url，不需要包通配符——host归一化(去www.)、路径里动态ID(比如会话ID/对话ID)
+  // 的识别，都在服务端urlsMatch()里统一处理了，客户端这边不用配合做任何特殊处理。
   function fetchGuideFromApi(pathname, flowId) {
-    //const likePattern = "%" + pathname + "%";
-    const likePattern = pathname ;
     return new Promise((resolve, reject) => {
       chrome.runtime.sendMessage(
-        { action: "fetch-guide", url: likePattern, flowId: flowId || "" },
+        { action: "fetch-guide", url: pathname, flowId: flowId || "" },
         (response) => {
           if (chrome.runtime.lastError) {
             reject(new Error(chrome.runtime.lastError.message));

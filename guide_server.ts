@@ -1,3 +1,4 @@
+import "dotenv/config";
 import express from "express";
 import * as mysql from "mysql2/promise";
 import fs from "fs";
@@ -41,16 +42,20 @@ interface FlowRecord {
 // /api/guide 使用 loadFlowById / loadFlowsByStarturl 按需查询。
 // ============================================================
 
-const pool = mysql.createPool({
-  host: process.env.DB_HOST || "81.69.17.148",
-  port: parseInt(process.env.DB_PORT || "3306", 10),
-  database: process.env.DB_DATABASE || "wuzi",
-  user: process.env.DB_USERNAME || "webapp_user",
-  password: process.env.DB_PASSWORD || "StrongPass123!",
-  waitForConnections: true,
-  connectionLimit: 10,
-  connectTimeout: 5000,
-});
+const SKIP_DB = process.env.SKIP_DB === "true";
+
+const pool = SKIP_DB
+  ? null
+  : mysql.createPool({
+      host: process.env.DB_HOST || "81.69.17.148",
+      port: parseInt(process.env.DB_PORT || "3306", 10),
+      database: process.env.DB_DATABASE || "wuzi",
+      user: process.env.DB_USERNAME || "webapp_user",
+      password: process.env.DB_PASSWORD || "StrongPass123!",
+      waitForConnections: true,
+      connectionLimit: 10,
+      connectTimeout: 2000,
+    });
 
 function loadAllFlowsFromFiles(): FlowRecord[] {
   const flowsDir = path.resolve("api/flows");
@@ -63,6 +68,7 @@ function loadAllFlowsFromFiles(): FlowRecord[] {
 }
 
 async function loadFlowById(id: string): Promise<FlowRecord | null> {
+  if (SKIP_DB || !pool) return null;
   try {
     const [rows] = await pool.query(
       "SELECT id, class, subclass, starturl, steps FROM appguide WHERE id = ?",
@@ -85,13 +91,19 @@ async function loadFlowById(id: string): Promise<FlowRecord | null> {
   }
 }
 
-async function loadFlowsByStarturl(starturl: string): Promise<FlowRecord[] | null> {
+async function loadFlowsByStarturl(rawUrl: string): Promise<FlowRecord[] | null> {
+  if (SKIP_DB || !pool) return null;
   try {
+    const host = normalizeHost(rawUrl);
+    // SQL层只用域名做粗筛，缩小从DB传回来的候选数量——这一步纯粹是性能优化，
+    // 不承担正确性：哪怕粗筛进来了域名相同但路径结构不同的记录，下面urlsMatch()
+    // 那层精确过滤（含动态ID识别）会正确排除掉。真正的"能不能算同一个页面"
+    // 这种需要逐段判断的逻辑，SQL的LIKE做不了，只能在JS里做。
     const [rows] = await pool.query(
       "SELECT id, class, subclass, starturl, steps FROM appguide WHERE starturl LIKE ?",
-      [starturl]
+      [`%${host}%`]
     );
-    return (rows as any[]).map((row) => {
+    const flows = (rows as any[]).map((row) => {
       const stepsData = typeof row.steps === "string" ? JSON.parse(row.steps) : row.steps;
       return {
         id: row.id,
@@ -102,6 +114,7 @@ async function loadFlowsByStarturl(starturl: string): Promise<FlowRecord[] | nul
         pages: stepsData.pages || [],
       } as FlowRecord;
     });
+    return flows.filter((f) => urlsMatch(f.starturl, rawUrl));
   } catch (err) {
     console.warn("[guide_server] loadFlowsByStarturl DB 不可用:", (err as Error).message);
     return null;
@@ -109,19 +122,78 @@ async function loadFlowsByStarturl(starturl: string): Promise<FlowRecord[] | nul
 }
 
 // ============================================================
-// URL 归一化：只比较 pathname，忽略协议/host/query string/末尾斜杠，
-// 避免因为格式细节差异导致本该匹配上的页面匹配失败。
+// URL 匹配：不能再用简单的字符串相等或"包含"判断了——
+// 数据库里的 starturl 是从某一次真实访问里截下来的完整URL，路径里可能带着
+// 会话ID/对话ID这类每次都不一样的动态片段（比如 kimi.com/chat/cou7r1qInI9eq53jqdd0），
+// 别的用户访问同一个功能页时这个ID必然不同，但页面本质上是"同一个页面"。
+//
+// 处理思路：host单独归一化比较（顺带解决 www. 有无不一致的问题）；
+// 路径按 "/" 分段，段数必须相等，每一段要么完全相同、要么两边都"长得像动态ID"才放行——
+// 不能用简单的字符串包含判断，那样太松，会把结构完全不同的页面也误判成同一个。
 // ============================================================
 
-function normalizeUrl(rawUrl: string): string {
+// 统一、安全地解析URL——特别处理"没有协议头"的情况。
+// content.js 发过来的url经过 getCleanPath() 处理，协议头(https://)已经被strip掉了，
+// 格式类似 "kimi.com/chat/xxx"。如果直接丢给 new URL(rawUrl, base) 解析，
+// 因为字符串本身不像一个"绝对URL"（没有 scheme），会被当成"相对路径"去拼接base，
+// 得到类似 "http://placeholder.local/kimi.com/chat/xxx" 这种域名被错误折进path里的结果——
+// host比较会直接失效。这里统一在解析前补上协议头，确保域名总是被正确识别。
+function parseUrlSafely(rawUrl: string): URL {
+  const withScheme = /^https?:\/\//i.test(rawUrl) ? rawUrl : `https://${rawUrl}`;
   try {
-    const u = new URL(rawUrl, "http://placeholder.local");
-    return u.pathname.replace(/\/+$/, "") || "/";
+    return new URL(withScheme);
   } catch {
-    return rawUrl.replace(/\/+$/, "") || "/";
+    // 极端情况下（比如rawUrl本身就不是合法URL格式）兜底返回一个空白URL，
+    // 让上层的host/path都是空值，自然匹配不上任何记录，不会抛错崩掉整个请求。
+    return new URL("https://invalid.invalid");
   }
 }
 
+function normalizeHost(rawUrl: string): string {
+  try {
+    return parseUrlSafely(rawUrl).hostname.replace(/^www\./i, "").toLowerCase();
+  } catch {
+    return "";
+  }
+}
+
+function normalizePathSegments(rawUrl: string): string[] {
+  try {
+    return parseUrlSafely(rawUrl).pathname.split("/").filter(Boolean);
+  } catch {
+    return rawUrl.split("/").filter(Boolean);
+  }
+}
+
+// 判断一段路径是不是"看起来像动态生成的ID"，不是就当作普通静态路径词处理。
+// 规则都是经验性的，业务URL分布不一样可能需要调阈值：
+// - 长度够长(>=8)且字母数字混排：典型的会话ID/token长相
+// - 纯数字且位数够多(>=6位)：典型的自增主键/时间戳类ID
+// - 标准UUID格式(8-4-4-4-12的十六进制)
+function looksLikeDynamicId(segment: string): boolean {
+  if (!segment) return false;
+  if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(segment)) return true;
+  if (/^\d{6,}$/.test(segment)) return true;
+  if (segment.length >= 8 && /[a-zA-Z]/.test(segment) && /[0-9]/.test(segment)) return true;
+  return false;
+}
+
+// 两个URL是否指向"同一个页面"：host归一化后必须相等；路径分段数必须相等；
+// 每一段要么原文完全相同，要么两边都长得像动态ID（这种情况下视为等价，跳过精确比较）。
+function urlsMatch(rawUrlA: string, rawUrlB: string): boolean {
+  if (normalizeHost(rawUrlA) !== normalizeHost(rawUrlB)) return false;
+
+  const segsA = normalizePathSegments(rawUrlA);
+  const segsB = normalizePathSegments(rawUrlB);
+  if (segsA.length !== segsB.length) return false;
+
+  for (let i = 0; i < segsA.length; i++) {
+    if (segsA[i] === segsB[i]) continue;
+    if (looksLikeDynamicId(segsA[i]) && looksLikeDynamicId(segsB[i])) continue;
+    return false;
+  }
+  return true;
+}
 // ============================================================
 // 核心：在指定flow内，用pathname匹配某一页，并算出
 // pageIndex / globalStepNumber(每一步) / totalSteps
@@ -142,16 +214,16 @@ interface ResolvedPage {
   };
 }
 
-function resolvePageInFlow(flow: FlowRecord, pathname: string): ResolvedPage | null {
-  let pageIndex = flow.pages.findIndex((p) => normalizeUrl(p.url) === normalizeUrl(pathname));
+function resolvePageInFlow(flow: FlowRecord, rawUrl: string): ResolvedPage | null {
+  let pageIndex = flow.pages.findIndex((p) => urlsMatch(p.url, rawUrl));
 
-  // 兜底：pages[].url 里没找到，但当前pathname其实就是这个flow的starturl——
+  // 兜底：pages[].url 里没找到，但当前url其实就是这个flow的starturl——
   // 说明用户是从这个流程的入口进来的，理应对应pages[0]，
   // 只是starturl字段和pages[0].url字段的字符串写法有细微出入（多余斜杠/大小写等）。
   // 这个兜底尤其重要：用户在"多候选"弹窗里选中某个流程后，插件会带着选中的flowId
-  // 重新请求同一个pathname；如果这里不兜底，一旦两个字段没有严格一致，
+  // 重新请求同一个url；如果这里不兜底，一旦两个字段没有严格一致，
   // 就会匹配失败、重新掉回分支B、又弹出一模一样的候选列表，表现成"点击没反应"。
-  if (pageIndex === -1 && flow.pages.length > 0 && normalizeUrl(flow.starturl) === normalizeUrl(pathname)) {
+  if (pageIndex === -1 && flow.pages.length > 0 && urlsMatch(flow.starturl, rawUrl)) {
     pageIndex = 0;
   }
 
@@ -217,7 +289,7 @@ app.get("/api/guide", async (req, res) => {
       return;
     }
 
-    const pathname = normalizeUrl(rawUrl);
+    // 实际匹配统一走 urlsMatch(rawUrl, ...)，不再需要单独维护一个pathname变量
 
     // 分支A：有进行中的 flowId，按主键查询该条记录
     if (inProgressFlowId) {
@@ -228,7 +300,7 @@ app.get("/api/guide", async (req, res) => {
         currentFlow = fileFlows.find((f) => f.id === inProgressFlowId) || null;
       }
       if (currentFlow) {
-        const resolved = resolvePageInFlow(currentFlow, pathname);
+        const resolved = resolvePageInFlow(currentFlow, rawUrl);
         if (resolved) {
           res.json({ success: true, mode: "resume", ...resolved });
           return;
@@ -237,13 +309,11 @@ app.get("/api/guide", async (req, res) => {
       // 没匹配到，不 return，继续往下走分支B
     }
 
-    // 分支B：按 starturl 精准查询
+    // 分支B：按 starturl 匹配（host归一化 + 路径动态ID识别）
     let candidates = await loadFlowsByStarturl(rawUrl);
     // DB 不可用时回退本地文件
     if (candidates === null) {
-      candidates = loadAllFlowsFromFiles().filter(
-        (f) => normalizeUrl(f.starturl) === pathname
-      );
+      candidates = loadAllFlowsFromFiles().filter((f) => urlsMatch(f.starturl, rawUrl));
     }
 
     if (candidates.length === 0) {
@@ -265,7 +335,7 @@ app.get("/api/guide", async (req, res) => {
     }
 
     // 命中1条
-    const resolved = resolvePageInFlow(candidates[0], pathname);
+    const resolved = resolvePageInFlow(candidates[0], rawUrl);
     if (!resolved) {
       // 理论上 starturl 应当等于 pages[0].url，这里做个兜底
       res.json({ success: false, reason: "not_found", message: "没有找到相应引导指南。" });
@@ -288,6 +358,10 @@ app.get("/api/flows/by-starturl", async (req, res) => {
     const starturl = typeof req.query.starturl === "string" ? req.query.starturl : "";
     if (!starturl) {
       res.status(400).json({ success: false, reason: "bad_request", message: "缺少 starturl 参数。" });
+      return;
+    }
+    if (SKIP_DB || !pool) {
+      res.status(503).json({ success: false, reason: "db_unavailable", message: "数据库未连接，请使用 /api/guide 端点。" });
       return;
     }
     const [rows] = await pool.query("SELECT * FROM appguide WHERE starturl LIKE ?", [starturl]);
@@ -316,6 +390,10 @@ app.get("/api/flows/by-id", async (req, res) => {
     const id = typeof req.query.id === "string" ? req.query.id : "";
     if (!id) {
       res.status(400).json({ success: false, reason: "bad_request", message: "缺少 id 参数。" });
+      return;
+    }
+    if (SKIP_DB || !pool) {
+      res.status(503).json({ success: false, reason: "db_unavailable", message: "数据库未连接，请使用 /api/guide 端点。" });
       return;
     }
     const [rows] = await pool.query("SELECT * FROM appguide WHERE id = ?", [id]);
