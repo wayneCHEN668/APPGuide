@@ -55,4 +55,50 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
     return true; // 保持消息通道开放以进行异步响应
   }
+
+  if (message.action === "fetch-flows-by-pattern") {
+    const cleanPath = message.url;
+
+    chrome.storage.local.get(["apiBaseUrl"], (result) => {
+      const apiBaseUrl = result.apiBaseUrl || "api.skillcloud.cn";
+      const baseUrl = /^https?:\/\//i.test(apiBaseUrl) ? apiBaseUrl : `http://${apiBaseUrl}`;
+      const fetchUrl = `${baseUrl}/rest?method=appguide.flows.bypattern&url=${encodeURIComponent(cleanPath)}`;
+
+      console.log("[Background] 代理获取流程模式匹配:", fetchUrl);
+
+      fetch(fetchUrl)
+        .then(res => res.json())
+        .then(data => sendResponse({ success: true, data }))
+        .catch(err => {
+          console.error("[Background] 获取流程模式匹配失败:", err);
+          sendResponse({ success: false, error: err.message });
+        });
+    });
+
+    return true;
+  }
+
+  if (message.action === "track-stats") {
+    const { flowId, type } = message;
+
+    chrome.storage.local.get(["apiBaseUrl"], (result) => {
+      const apiBaseUrl = result.apiBaseUrl || "api.skillcloud.cn";
+      const baseUrl = /^https?:\/\//i.test(apiBaseUrl) ? apiBaseUrl : `http://${apiBaseUrl}`;
+      const fetchUrl = `${baseUrl}/api/flows/stats`;
+
+      fetch(fetchUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id: flowId, type }),
+      })
+        .then(res => res.json())
+        .then(data => sendResponse({ success: true, data }))
+        .catch(err => {
+          console.error("[Background] 更新流程统计失败:", err);
+          sendResponse({ success: false, error: err.message });
+        });
+    });
+
+    return true;
+  }
 });

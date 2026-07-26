@@ -7,6 +7,9 @@ import path from "path";
 const app = express();
 const PORT = 3010;
 
+// 解析 JSON 请求体
+app.use(express.json());
+
 // ============================================================
 // 数据类型
 // ============================================================
@@ -100,7 +103,7 @@ async function loadFlowsByStarturl(rawUrl: string): Promise<FlowRecord[] | null>
     // 那层精确过滤（含动态ID识别）会正确排除掉。真正的"能不能算同一个页面"
     // 这种需要逐段判断的逻辑，SQL的LIKE做不了，只能在JS里做。
     const [rows] = await pool.query(
-      "SELECT id, class, subclass, starturl, steps FROM appguide WHERE starturl LIKE ?",
+      "SELECT id, class, subclass, title, starturl, steps FROM appguide WHERE starturl LIKE ?",
       [`%${host}%`]
     );
     const flows = (rows as any[]).map((row) => {
@@ -109,7 +112,7 @@ async function loadFlowsByStarturl(rawUrl: string): Promise<FlowRecord[] | null>
         id: row.id,
         class: row.class || "",
         subclass: row.subclass || "",
-        title: stepsData.title || "",
+        title: row.title || stepsData.title || "",
         starturl: row.starturl,
         pages: stepsData.pages || [],
       } as FlowRecord;
@@ -151,7 +154,7 @@ function parseUrlSafely(rawUrl: string): URL {
 
 function normalizeHost(rawUrl: string): string {
   try {
-    return parseUrlSafely(rawUrl).hostname.replace(/^www\./i, "").toLowerCase();
+    return parseUrlSafely(rawUrl).host.replace(/^www\./i, "").toLowerCase();
   } catch {
     return "";
   }
@@ -420,6 +423,59 @@ app.get("/api/flows/by-id", async (req, res) => {
 });
 
 // ============================================================
+// GET /api/flows/by-pattern?url=<cleanPath>
+// 去掉 url 中的疑似动态ID片段后，用剩余静态路径做 LIKE 粗筛，
+// 返回当前页面及子页面下所有匹配流程的 id / title / starturl。
+// 用于插件在页面加载时静默检测，无需用户按 Alt+G 即可展示可用引导数量。
+// ============================================================
+
+app.get("/api/flows/by-pattern", async (req, res) => {
+  try {
+    const rawUrl = typeof req.query.url === "string" ? req.query.url : "";
+    if (!rawUrl) {
+      res.status(400).json({ success: false, reason: "bad_request", message: "缺少 url 参数。" });
+      return;
+    }
+
+    // 去掉路径中疑似动态ID的片段，只保留静态部分作为匹配模式
+    // 注意：这里必须用 host（含端口）而不是 hostname，因为数据库中 starturl
+    // 可能带有非默认端口（如 :8080），用 hostname 会导致 LIKE 模式丢端口从而匹配失败。
+    const url = parseUrlSafely(rawUrl);
+    const host = url.host; // 含端口
+    const segs = normalizePathSegments(rawUrl);
+    const staticSegs = segs.filter(s => !looksLikeDynamicId(s));
+    const pattern = staticSegs.length > 0 ? `${host}/${staticSegs.join("/")}` : host;
+
+    if (SKIP_DB || !pool) {
+      const fileFlows = loadAllFlowsFromFiles();
+      const matched = fileFlows.filter(f => f.starturl.includes(pattern));
+      res.json({
+        success: true,
+        data: matched.map(f => ({ id: f.id, title: f.title, starturl: f.starturl }))
+      });
+      return;
+    }
+
+    const [rows] = await pool.query(
+      "SELECT id, title, starturl, steps FROM appguide WHERE starturl LIKE ?",
+      [`%${pattern}%`]
+    );
+    const data = (rows as any[]).map(row => {
+      const stepsData = typeof row.steps === "string" ? JSON.parse(row.steps) : row.steps;
+      return {
+        id: row.id,
+        title: row.title || (stepsData && stepsData.title) || "",
+        starturl: row.starturl,
+      };
+    });
+    res.json({ success: true, data });
+  } catch (err) {
+    console.error("[guide_server] /api/flows/by-pattern 处理出错:", err);
+    res.status(500).json({ success: false, reason: "server_error", message: "服务端查询数据时出错。" });
+  }
+});
+
+// ============================================================
 // GET /rest?method=appguide.flows.xxx  — 兼容生产环境统一入口
 // 将 method 参数映射到对应的 /api/* 路由，方便插件在同一种 URL
 // 格式下切换本地/云端端点。
@@ -444,7 +500,45 @@ app.get("/rest", async (req, res) => {
     return app.handle(req, res);
   }
 
+  if (method === "appguide.flows.bypattern") {
+    req.url = `/api/flows/by-pattern?url=${req.query.url || ""}`;
+    return app.handle(req, res);
+  }
+
   res.status(400).json({ success: false, reason: "bad_request", message: `未知的 method: ${method}` });
+});
+
+// ============================================================
+// POST /api/flows/stats  — 更新流程单击计数
+// body: { id: string, type: "process" | "step" }
+// type=process → process_count+1（激活流程时）
+// type=step    → steps_count+1   （步骤导航时）
+// ============================================================
+
+app.post("/api/flows/stats", async (req, res) => {
+  try {
+    const { id, type } = req.body;
+    if (!id || !type) {
+      res.status(400).json({ success: false, reason: "bad_request", message: "缺少 id 或 type 参数。" });
+      return;
+    }
+    const column = type === "process" ? "process_count" : type === "step" ? "steps_count" : null;
+    if (!column) {
+      res.status(400).json({ success: false, reason: "bad_request", message: `无效的 type: ${type}` });
+      return;
+    }
+
+    if (SKIP_DB || !pool) {
+      res.json({ success: true });
+      return;
+    }
+
+    await pool.query(`UPDATE appguide SET ${column} = COALESCE(${column}, 0) + 1 WHERE id = ?`, [id]);
+    res.json({ success: true });
+  } catch (err) {
+    console.error("[guide_server] POST /api/flows/stats 出错:", (err as Error).message);
+    res.status(500).json({ success: false, reason: "server_error", message: "更新统计数据时出错。" });
+  }
 });
 
 app.listen(PORT, () => {

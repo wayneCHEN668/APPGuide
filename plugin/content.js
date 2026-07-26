@@ -118,6 +118,50 @@
       }
     })();
 
+    // ------------------ 页面加载时静默检测可用引导流程 ------------------
+    // 提取为可复用的函数，页面跳转后也需要重新检测
+    async function refreshFlowNotification() {
+      // 先清掉旧通知，避免短暂残留上一页的结果
+      removeFlowNotification();
+      try {
+        const flows = await fetchFlowsByPattern(getCleanPath());
+        if (flows && flows.length > 0) {
+          console.log("[BusinessGuide] 检测到", flows.length, "个可用引导流程");
+          renderFlowNotification(flows);
+        }
+        // 结果为 0 时不渲染任何东西（旧通知已在上面清掉）
+      } catch (e) {
+        // 静默忽略，不打扰用户
+      }
+    }
+
+    // 页面首次加载时检测
+    refreshFlowNotification();
+
+    // 监听 URL 变化（SPA 路由跳转 / pushState / popstate），重新检测当前页的可用流程
+    let lastCheckedPath = getCleanPath();
+    const checkUrlChange = () => {
+      const currentPath = getCleanPath();
+      if (currentPath !== lastCheckedPath) {
+        lastCheckedPath = currentPath;
+        refreshFlowNotification();
+      }
+    };
+    window.addEventListener("popstate", checkUrlChange);
+    // 拦截 pushState / replaceState 以覆盖 SPA 路由跳转
+    const origPushState = history.pushState;
+    const origReplaceState = history.replaceState;
+    history.pushState = function (...args) {
+      origPushState.apply(this, args);
+      checkUrlChange();
+    };
+    history.replaceState = function (...args) {
+      origReplaceState.apply(this, args);
+      checkUrlChange();
+    };
+    // 兜底：每 2 秒轮询检查（部分 SPA 用 hash 跳转不会触发上述事件）
+    setInterval(checkUrlChange, 2000);
+
     // 监听页面元素焦点的捕获（自动流程流转）
     document.addEventListener("focus", (e) => {
       if (!isGuideActive || !activeGuide) return;
@@ -682,6 +726,25 @@
     });
   }
 
+  // 通过 background worker 查询当前页面及子页面的所有可用引导流程
+  function fetchFlowsByPattern(pathname) {
+    return new Promise((resolve, reject) => {
+      chrome.runtime.sendMessage(
+        { action: "fetch-flows-by-pattern", url: pathname },
+        (response) => {
+          if (chrome.runtime.lastError) {
+            reject(new Error(chrome.runtime.lastError.message));
+          } else if (response && response.success) {
+            // response.data 是服务端返回的 { success, data }，取内部的 data 数组
+            resolve(response.data && response.data.data ? response.data.data : []);
+          } else {
+            reject(new Error((response && response.error) || "API 请求失败"));
+          }
+        }
+      );
+    });
+  }
+
   // 读取跨页流程运行时状态，并做TTL过期判断（过期则顺手清空，返回null）
   function getFlowStateIfValid() {
     return new Promise((resolve) => {
@@ -818,6 +881,10 @@
 
     currentStepIndex = startLocalIndex;
     isGuideActive = true;
+
+    // 统计：流程被激活（新流程或续接）
+    trackFlowStat(data.flowId, "process");
+
     renderGuideUI();
 
     if (!isGuideActive || !activeGuide) {
@@ -1361,6 +1428,8 @@
     // （跨页后退涉及浏览器历史导航，复杂度更高，暂不在这次范围内）
     if (currentStepIndex > 0) {
       currentStepIndex--;
+      // 统计：步骤导航
+      if (flowMeta) trackFlowStat(flowMeta.flowId, "step");
       renderGuideUI();
       if (!isGuideActive || !activeGuide) return; // 上一步的目标元素没匹配到，已中断
       persistFlowState(activeGuide.steps[currentStepIndex].globalStepNumber);
@@ -1377,6 +1446,8 @@
 
     if (!isLastStepOnPage) {
       currentStepIndex++;
+      // 统计：步骤导航（下一步 / 前往下一页）
+      if (flowMeta) trackFlowStat(flowMeta.flowId, "step");
       renderGuideUI();
       if (!isGuideActive || !activeGuide) return; // 下一步的目标元素没匹配到，已中断
       persistFlowState(activeGuide.steps[currentStepIndex].globalStepNumber);
@@ -1447,5 +1518,79 @@
         if (toast.parentNode) toast.parentNode.removeChild(toast);
       }, 300);
     }, 3500);
+  }
+
+  // ------------------ 可用流程浮动通知 ------------------
+  let flowNotificationEl = null;
+
+  function renderFlowNotification(flows) {
+    if (flowNotificationEl) {
+      flowNotificationEl.parentNode && flowNotificationEl.parentNode.removeChild(flowNotificationEl);
+      flowNotificationEl = null;
+    }
+
+    const container = document.createElement("div");
+    container.className = "guide-extension-flow-notify";
+    container.innerHTML =
+      `<div class="gf-notify-header">
+        <span>当前页面及子页面有 <strong>${flows.length}</strong> 个引导流程</span>
+        <span class="gf-notify-arrow">▾</span>
+      </div>
+      <div class="gf-notify-list">
+        ${flows.map((f, i) => `
+          <div class="gf-notify-item" data-starturl="${escapeHtml(f.starturl)}">
+            <span class="gf-notify-index">${i + 1}.</span>
+            <span class="gf-notify-title">${escapeHtml(f.title)}</span>
+          </div>
+        `).join("")}
+        <div class="gf-notify-hint">单击需要完成的流程前往该页面，然后请按<br/> <kbd>ALT</kbd> + <kbd>G</kbd> 开始页面流程引导</div>
+      </div>`;
+    document.body.appendChild(container);
+    flowNotificationEl = container;
+
+    const header = container.querySelector(".gf-notify-header");
+    const list = container.querySelector(".gf-notify-list");
+
+    header.addEventListener("click", () => {
+      const isOpen = list.classList.toggle("gf-open");
+      container.querySelector(".gf-notify-arrow").textContent = isOpen ? "▴" : "▾";
+    });
+
+    list.querySelectorAll(".gf-notify-item").forEach(item => {
+      item.addEventListener("click", () => {
+        const starturl = item.getAttribute("data-starturl");
+        if (starturl) {
+          // 点击后移除浮动框，再导航
+          removeFlowNotification();
+          window.location.href = /^https?:\/\//i.test(starturl)
+            ? starturl
+            : `${window.location.protocol}//${starturl}`;
+        }
+      });
+    });
+  }
+
+  function removeFlowNotification() {
+    if (flowNotificationEl && flowNotificationEl.parentNode) {
+      flowNotificationEl.parentNode.removeChild(flowNotificationEl);
+      flowNotificationEl = null;
+    }
+  }
+
+  function escapeHtml(str) {
+    const div = document.createElement("div");
+    div.textContent = str;
+    return div.innerHTML;
+  }
+
+  // 向后台发送流程统计（fire-and-forget，不阻塞主流程）
+  function trackFlowStat(flowId, type) {
+    try {
+      chrome.runtime.sendMessage({ action: "track-stats", flowId, type }, () => {
+        // 忽略 chrome.runtime.lastError
+      });
+    } catch (e) {
+      // 静默忽略
+    }
   }
 })();
