@@ -25,6 +25,7 @@
   let bubbleElement = null;
   let highlightElement = null;
   let resizeObserver = null;
+  let confirmOverlayEl = null;
 
   // 本次页面加载内，已经被某一步选中/高亮过的元素——用于"重复label去重"（见 findBestSemanticMatch）。
   // 用WeakSet是因为不需要手动清理，元素被移出DOM后会自动被垃圾回收。
@@ -123,8 +124,11 @@
     async function refreshFlowNotification() {
       // 先清掉旧通知，避免短暂残留上一页的结果
       removeFlowNotification();
+      flowNotifyRequestToken++;
+      const myToken = flowNotifyRequestToken;
       try {
         const flows = await fetchFlowsByPattern(getCleanPath());
+        if (myToken !== flowNotifyRequestToken) return; // 丢弃过期响应
         if (flows && flows.length > 0) {
           console.log("[BusinessGuide] 检测到", flows.length, "个可用引导流程");
           renderFlowNotification(flows);
@@ -952,6 +956,7 @@
 
   // 渲染/重绘 高亮框与浮窗气泡
   let renderRequestToken = 0; // 每次渲染自增，用于让过期的异步重试/iframe探测结果自动作废
+  let flowNotifyRequestToken = 0; // 防止快速连续跳转时过期的流程通知覆盖当前页面
 
   const LOCAL_RETRY_COUNT = 3;
   const LOCAL_RETRY_DELAY_MS = 400;
@@ -1220,6 +1225,7 @@
   function showConfirmDialog(step, onContinue, onAbort) {
     const overlay = document.createElement("div");
     overlay.className = "guide-confirm-overlay";
+    confirmOverlayEl = overlay;
 
     const dialog = document.createElement("div");
     dialog.className = "guide-confirm-dialog";
@@ -1244,6 +1250,7 @@
 
     const cleanup = () => {
       if (overlay.parentNode) overlay.parentNode.removeChild(overlay);
+      confirmOverlayEl = null;
     };
 
     document.getElementById("guide-confirm-skip").onclick = () => {
@@ -1272,11 +1279,8 @@
       // 中止引导
       () => {
         console.log(`[BusinessGuide] 用户选择中止引导（步骤"${step.title}"未命中）。`);
-        isGuideActive = false;
-        activeGuide = null;
-        flowMeta = null;
-        clearFlowState();
         showToast("引导已中止，流程进度已清除。");
+        disableGuide();
       }
     );
   }
@@ -1487,6 +1491,11 @@
     }
     bubbleElement = null;
     highlightElement = null;
+
+    if (confirmOverlayEl && confirmOverlayEl.parentNode) {
+      confirmOverlayEl.parentNode.removeChild(confirmOverlayEl);
+      confirmOverlayEl = null;
+    }
 
     // 顶层每次清理UI时，顺带广播给所有子iframe：把你们各自可能画着的高亮也清掉。
     // 这样即使上一步的目标在某个iframe里，切到下一步/关闭引导时也不会留下一个擦不掉的高亮框。

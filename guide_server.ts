@@ -46,6 +46,9 @@ interface FlowRecord {
 // ============================================================
 
 const SKIP_DB = process.env.SKIP_DB === "true";
+if (SKIP_DB) {
+  console.warn("[guide-server] SKIP_DB=true，所有流程数据将从本地文件 api/flows/*.json 加载，数据库不会被连接。");
+}
 
 const pool = SKIP_DB
   ? null
@@ -57,7 +60,7 @@ const pool = SKIP_DB
       password: process.env.DB_PASSWORD || "StrongPass123!",
       waitForConnections: true,
       connectionLimit: 10,
-      connectTimeout: 2000,
+      connectTimeout: 4000,
     });
 
 function loadAllFlowsFromFiles(): FlowRecord[] {
