@@ -236,6 +236,7 @@
             type: "find-result",
             requestId: data.requestId,
             found: !!local,
+            score: local ? local.scorePercent : 0,
           }, "*");
         } catch (e) {
           console.error("[BusinessGuide][iframe] 回复顶层失败（parent可能已不可达）:", e);
@@ -625,7 +626,7 @@
       if (isDebug && bestOverlap > 0.3) {
         s2Top.push({label: item.label.substring(0,30), selector: item.selector, overlap, titleOverlap: titleOverlap.toFixed(2), labelOverlap: labelOverlap.toFixed(2), best: bestOverlap.toFixed(2)});
       }
-      if (bestOverlap >= 0.5 && titleSet.size >= 2) {
+      if (bestOverlap >= 0.5 && titleSet.size >= 2 && overlap >= 2) {
         s2Matches.push({ ...item, bestOverlap });
       }
     }
@@ -998,6 +999,31 @@
 
     const local = resolveLocalTarget(step);
     if (local) {
+      // 低置信度（<80%）且页面有iframe时，不立即采纳本地结果，
+      // 而是并行探测iframe，取置信度最高的那个——避免主页低分匹配截胡iframe里的正确目标。
+      const LOW_CONFIDENCE = 80;
+      const iframeEls = IS_TOP_FRAME ? Array.from(document.querySelectorAll("iframe")) : [];
+      if (local.scorePercent < LOW_CONFIDENCE && iframeEls.length > 0) {
+        console.log(`[BusinessGuide] 本地匹配到"${step.title}"，置信度仅${local.scorePercent}%，并行探测iframe以比较...`);
+        probeChildFrames(step, iframeEls).then((bestIframe) => {
+          if (myToken !== renderRequestToken) return;
+          if (!isGuideActive || !activeGuide || activeGuide.steps[currentStepIndex] !== step) return;
+
+          if (bestIframe && bestIframe.score > local.scorePercent) {
+            console.log(`[BusinessGuide] iframe匹配(${bestIframe.score}%)优于本地(${local.scorePercent}%)，采用iframe结果`);
+            // 高亮已由匹配到的iframe自己画好（见顶部iframe worker消息处理），
+            // 顶层这里只需要把气泡贴着iframe边界摆放
+            renderBubble(step, bestIframe.iframeEl);
+          } else {
+            console.log(`[BusinessGuide] 本地匹配(${local.scorePercent}%)优于或等于iframe，采用本地结果`);
+            usedElements.add(local.element);
+            createHighlightForElement(local.element, step.highlightStyle);
+            renderBubble(step, local.element);
+          }
+        });
+        return;
+      }
+
       usedElements.add(local.element);
       createHighlightForElement(local.element, step.highlightStyle);
       renderBubble(step, local.element);
@@ -1027,16 +1053,16 @@
       return;
     }
 
-    probeChildFrames(step, iframeEls).then((foundIframeEl) => {
+    probeChildFrames(step, iframeEls).then((bestIframe) => {
       // 探测是异步的，回来的时候用户可能已经点了下一步/关闭了引导/翻到了别的步骤，
       // 用token校验一下，过期的结果直接丢弃，不能覆盖当前状态。
       if (myToken !== renderRequestToken) return;
       if (!isGuideActive || !activeGuide || activeGuide.steps[currentStepIndex] !== step) return;
 
-      if (foundIframeEl) {
+      if (bestIframe) {
         // 高亮已经由匹配到目标的那个iframe自己画好了（见文件顶部iframe worker消息处理），
         // 顶层这里只需要把气泡贴着这个iframe的边界摆放即可，不需要（也没法）自己再画一次高亮。
-        renderBubble(step, foundIframeEl);
+        renderBubble(step, bestIframe.iframeEl);
       } else {
         handleTargetNotFound(step);
       }
@@ -1143,6 +1169,7 @@
     return new Promise((resolve) => {
       const requestId = "req_" + Date.now() + "_" + Math.random().toString(36).slice(2);
       let settled = false;
+      let bestResult = null; // { iframeEl, score }
 
       // 只传纯数据字段，避免把内部运行时状态（如上一次匹配残留的resolvedSelector）带出去。
       // 注意：clickText/actionType 必须带上——Strategy0现在优先用clickText匹配，
@@ -1179,11 +1206,10 @@
           );
           return;
         }
-        if (!settled) {
-          settled = true;
-          console.log("[BusinessGuide] 探测成功：目标元素位于某个子iframe内，已收到其回复。");
-          window.removeEventListener("message", onMessage);
-          resolve(matchedIframe);
+        const score = typeof data.score === "number" ? data.score : 0;
+        console.log(`[BusinessGuide] iframe回复找到目标，置信度: ${score}%`);
+        if (!bestResult || score > bestResult.score) {
+          bestResult = { iframeEl: matchedIframe, score };
         }
       }
       window.addEventListener("message", onMessage);
@@ -1210,7 +1236,10 @@
         if (!settled) {
           settled = true;
           window.removeEventListener("message", onMessage);
-          if (attemptsLeft > 1) {
+          if (bestResult) {
+            console.log(`[BusinessGuide] 探测结束，选取最佳iframe结果，置信度: ${bestResult.score}%`);
+            resolve(bestResult);
+          } else if (attemptsLeft > 1) {
             console.warn(`[BusinessGuide] 探测超时（${IFRAME_PROBE_TIMEOUT_MS}ms内没有任何iframe回复找到目标），还有${attemptsLeft - 1}次重试机会，可能是iframe自己还在加载，正在重试...`);
             resolve(probeChildFrames(step, iframeEls, attemptsLeft - 1));
           } else {
