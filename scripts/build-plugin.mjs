@@ -3,7 +3,7 @@
  * 用法：node scripts/build-plugin.mjs
  */
 
-import { readFileSync, writeFileSync, mkdirSync, readdirSync, existsSync, cpSync } from 'fs';
+import { readFileSync, writeFileSync, mkdirSync, readdirSync, existsSync, cpSync, statSync } from 'fs';
 import { join, extname, basename } from 'path';
 import { fileURLToPath } from 'url';
 import JavaScriptObfuscator from 'javascript-obfuscator';
@@ -81,10 +81,11 @@ function main() {
       console.log(`  🎨 ${file} → ${(code.length / 1024).toFixed(1)}KB → ${(result.styles.length / 1024).toFixed(1)}KB`);
       cssCount++;
     } else {
-      // ── 其他文件直接复制（manifest.json, popup.html 等） ──
+      // ── 其他文件/目录直接复制（manifest.json, popup.html, icons/ 等） ──
       const outPath = join(outDir, file);
-      cpSync(srcPath, outPath);
-      console.log(`  📄 ${file} → 直接复制`);
+      const isDir = statSync(srcPath).isDirectory();
+      cpSync(srcPath, outPath, { recursive: isDir });
+      console.log(`  📄 ${file}${isDir ? '/' : ''} → 直接复制`);
       copyCount++;
     }
   }
