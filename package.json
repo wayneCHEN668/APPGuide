@@ -8,6 +8,7 @@
     "build": "vite build && esbuild server.ts --bundle --platform=node --format=cjs --packages=external --sourcemap --outfile=dist/server.cjs",
     "build:guide": "esbuild guide_server.ts --bundle --platform=node --format=cjs --packages=external --outfile=dist/guide_server.cjs",
     "start": "node dist/server.cjs",
+    "start:guide": "node dist/guide_server.cjs",
     "build:plugin": "node scripts/build-plugin.mjs",
     "clean": "rm -rf dist server.js",
     "lint": "tsc --noEmit",

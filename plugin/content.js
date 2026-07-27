@@ -814,6 +814,17 @@
       //.toLowerCase() || "/";
   }
 
+  // URL 归一化比较：去协议、query、hash、尾斜杠、www. 前缀，转小写
+  // 用于客户端判断 startUrl 与当前页面是否为"同一页面"
+  function normalizeUrlForMatch(rawUrl) {
+    return rawUrl
+      .replace(/^https?:\/\//i, "")
+      .replace(/^www\./i, "")
+      .replace(/[?#].*$/, "")
+      .replace(/\/+$/, "")
+      .toLowerCase();
+  }
+
   // 核心功能：开关引导（用户手动按 Alt+G 触发）
   async function enableGuide() {
     const cleanPath = getCleanPath();
@@ -1580,7 +1591,7 @@
       </div>
       <div class="gf-notify-list">
         ${flows.map((f, i) => `
-          <div class="gf-notify-item" data-starturl="${escapeHtml(f.starturl)}">
+          <div class="gf-notify-item" data-flowid="${escapeHtml(f.id)}" data-starturl="${escapeHtml(f.starturl)}">
             <span class="gf-notify-index">${i + 1}.</span>
             <span class="gf-notify-title">${escapeHtml(f.title)}</span>
           </div>
@@ -1605,9 +1616,23 @@
     });
 
     list.querySelectorAll(".gf-notify-item").forEach(item => {
-      item.addEventListener("click", () => {
+      item.addEventListener("click", async () => {
         const starturl = item.getAttribute("data-starturl");
+        const flowId = item.getAttribute("data-flowid");
         if (starturl) {
+          // 归一化比较 startUrl 与当前页面 URL：
+          // 若一致则无需跳转浏览器，直接启动该流程的页面引导
+          if (normalizeUrlForMatch(starturl) === normalizeUrlForMatch(window.location.href)) {
+            removeFlowNotification();
+            try {
+              const data = await fetchGuideFromApi(getCleanPath(), flowId);
+              handleGuideApiResult(data, getCleanPath(), null, true);
+            } catch (e) {
+              console.error("[BusinessGuide] 通知入口启动引导失败:", e);
+              showToast("❌ 业务指南网络服务端点连接失败");
+            }
+            return;
+          }
           // 点击后移除浮动框，再导航
           removeFlowNotification();
           window.location.href = /^https?:\/\//i.test(starturl)
