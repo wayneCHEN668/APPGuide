@@ -26,6 +26,7 @@
   let highlightElement = null;
   let resizeObserver = null;
   let confirmOverlayEl = null;
+  let flowNotificationEl = null;
 
   // 本次页面加载内，已经被某一步选中/高亮过的元素——用于"重复label去重"（见 findBestSemanticMatch）。
   // 用WeakSet是因为不需要手动清理，元素被移出DOM后会自动被垃圾回收。
@@ -121,6 +122,7 @@
 
     // ------------------ 页面加载时静默检测可用引导流程 ------------------
     // 提取为可复用的函数，页面跳转后也需要重新检测
+    let flowNotifyRequestToken = 0; // 防止快速连续跳转时过期的流程通知覆盖当前页面
     async function refreshFlowNotification() {
       // 先清掉旧通知，避免短暂残留上一页的结果
       removeFlowNotification();
@@ -135,7 +137,7 @@
         }
         // 结果为 0 时不渲染任何东西（旧通知已在上面清掉）
       } catch (e) {
-        // 静默忽略，不打扰用户
+        console.warn("[BusinessGuide] refreshFlowNotification 失败:", e);
       }
     }
 
@@ -932,6 +934,7 @@
     bubbleElement.querySelectorAll(".guide-candidate-item").forEach((btn) => {
       btn.onclick = async () => {
         const chosenFlowId = btn.getAttribute("data-flow-id");
+        console.log("[BusinessGuide] 用户选择了流程, flowId:", chosenFlowId, "title:", btn.querySelector("strong")?.textContent);
         try {
           const data = await fetchGuideFromApi(cleanPath, chosenFlowId);
           handleGuideApiResult(data, cleanPath, null, true);
@@ -956,7 +959,6 @@
 
   // 渲染/重绘 高亮框与浮窗气泡
   let renderRequestToken = 0; // 每次渲染自增，用于让过期的异步重试/iframe探测结果自动作废
-  let flowNotifyRequestToken = 0; // 防止快速连续跳转时过期的流程通知覆盖当前页面
 
   const LOCAL_RETRY_COUNT = 3;
   const LOCAL_RETRY_DELAY_MS = 400;
@@ -1530,7 +1532,6 @@
   }
 
   // ------------------ 可用流程浮动通知 ------------------
-  let flowNotificationEl = null;
 
   function renderFlowNotification(flows) {
     if (flowNotificationEl) {
@@ -1543,7 +1544,10 @@
     container.innerHTML =
       `<div class="gf-notify-header">
         <span>当前页面及子页面有 <strong>${flows.length}</strong> 个引导流程</span>
-        <span class="gf-notify-arrow">▾</span>
+        <div class="gf-notify-header-right">
+          <span class="gf-notify-arrow">▾</span>
+          <button class="gf-notify-close-btn" title="关闭">×</button>
+        </div>
       </div>
       <div class="gf-notify-list">
         ${flows.map((f, i) => `
@@ -1563,6 +1567,12 @@
     header.addEventListener("click", () => {
       const isOpen = list.classList.toggle("gf-open");
       container.querySelector(".gf-notify-arrow").textContent = isOpen ? "▴" : "▾";
+    });
+
+    const closeBtn = container.querySelector(".gf-notify-close-btn");
+    closeBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      removeFlowNotification();
     });
 
     list.querySelectorAll(".gf-notify-item").forEach(item => {

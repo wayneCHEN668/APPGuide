@@ -87,7 +87,7 @@ async function loadFlowById(id: string): Promise<FlowRecord | null> {
       id: row.id,
       class: row.class || "",
       subclass: row.subclass || "",
-      title: stepsData.title || "",
+      title: row.title || stepsData.title || "",
       starturl: row.starturl,
       pages: stepsData.pages || [],
     } as FlowRecord;

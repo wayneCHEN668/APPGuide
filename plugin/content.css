@@ -398,10 +398,30 @@
 .gf-notify-header strong {
   color: #60a5fa;
 }
+.gf-notify-header-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
 .gf-notify-arrow {
   color: #60a5fa;
   font-size: 12px;
   transition: transform 0.2s;
+}
+.gf-notify-close-btn {
+  background: none;
+  border: none;
+  color: #94a3b8;
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 2px;
+  border-radius: 4px;
+  transition: color 0.15s, background 0.15s;
+}
+.gf-notify-close-btn:hover {
+  color: #fff;
+  background: rgba(255, 255, 255, 0.1);
 }
 .gf-notify-list {
   display: none;
