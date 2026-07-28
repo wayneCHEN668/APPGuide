@@ -613,10 +613,13 @@
     if (isDebug) console.log("[DEBUG] S1 未命中，进入S2");
 
     // 策略2: 标题全字符双向重叠检测
+    // 候选文本长度 > 8 的通常不是单个可交互控件（如大段说明文字），直接跳过
     if (isDebug) console.log("[DEBUG] S2 开始扫描...");
     let s2Top = [];
     const s2Matches = [];
     for (const item of scanned) {
+      const labelLen = item.label.replace(/\s/g, '').length;
+      if (labelLen > 8) continue;
       const titleSet = new Set(matchText.replace(/\s/g, '').split(''));
       const labelSet = new Set(item.label.replace(/\s/g, '').split(''));
       const overlap = [...titleSet].filter(c => labelSet.has(c)).length;
