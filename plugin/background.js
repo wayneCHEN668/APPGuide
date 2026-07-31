@@ -84,13 +84,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     chrome.storage.local.get(["apiBaseUrl"], (result) => {
       const apiBaseUrl = result.apiBaseUrl || "api.skillcloud.cn";
       const baseUrl = /^https?:\/\//i.test(apiBaseUrl) ? apiBaseUrl : `http://${apiBaseUrl}`;
-      const fetchUrl = `${baseUrl}/api/flows/stats`;
+      const fetchUrl = `${baseUrl}/rest?method=appguide.flows.stats&id=${encodeURIComponent(flowId)}&type=${encodeURIComponent(type)}`;
 
-      fetch(fetchUrl, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ id: flowId, type }),
-      })
+      console.log("[Background] 更新流程统计:", fetchUrl);
+
+      fetch(fetchUrl)
         .then(res => res.json())
         .then(data => sendResponse({ success: true, data }))
         .catch(err => {

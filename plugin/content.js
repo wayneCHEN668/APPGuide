@@ -931,12 +931,12 @@
         <button id="guide-close-btn" class="guide-btn-close">×</button>
       </div>
       <div class="guide-body">
-        <h3 class="guide-step-title">检测到多个可用引导流程</h3>
+        <h3 class="guide-step-title">当前页检测到${candidates.length}个可用引导流程</h3>
         <p class="guide-step-desc">请选择要开始的流程：</p>
         <div class="guide-candidate-list">
-          ${candidates.map(c => `
+          ${candidates.map((c, i) => `
             <button class="guide-candidate-item" data-flow-id="${c.flowId}">
-              <strong>${c.title}</strong>
+              <strong>${i + 1}. ${c.title}</strong>
               <span>${c.description || ""}</span>
             </button>
           `).join("")}
@@ -1078,7 +1078,17 @@
         // 顶层这里只需要把气泡贴着这个iframe的边界摆放即可，不需要（也没法）自己再画一次高亮。
         renderBubble(step, bestIframe.iframeEl);
       } else {
-        handleTargetNotFound(step);
+        // iframe探测也未命中，最后尝试一次本地语义匹配（skipSelector=true强制跳过selector走S0-S3）
+        console.log(`[BusinessGuide] iframe探测也未找到"${step.title}"，回退本地语义匹配...`);
+        const semanticLocal = resolveLocalTarget(step, true);
+        if (semanticLocal) {
+          console.log(`[BusinessGuide] 语义匹配回退成功！绑定到"${step.resolvedSelector}"`);
+          usedElements.add(semanticLocal.element);
+          createHighlightForElement(semanticLocal.element, step.highlightStyle);
+          renderBubble(step, semanticLocal.element);
+        } else {
+          handleTargetNotFound(step);
+        }
       }
     });
   }
@@ -1099,17 +1109,29 @@
   // 只在"当前文档自己的DOM"里找目标元素（不涉及iframe）。
   // 顶层和iframe worker共用这一份逻辑：顶层用它来处理本页字段，
   // iframe worker收到顶层探测请求时，也是调用这个函数来判断自己是否有匹配的控件。
-  function resolveLocalTarget(step) {
+  // skipSelector: 为true时跳过显式selector查找，直接进入语义匹配（供上层在iframe探测失败后回调使用）
+  function resolveLocalTarget(step, skipSelector) {
     let targetElement = null;
     let matchMethod = "精确选择器定位";
     let scorePercent = 100;
 
-    if (step.selector && step.selector !== "auto") {
+    if (!skipSelector && step.selector && step.selector !== "auto") {
       targetElement = document.querySelector(step.selector);
+      if (targetElement) {
+        step.resolvedSelector = step.selector;
+        return { element: targetElement, matchMethod, scorePercent };
+      }
+      // 显式selector未命中：顶层且有iframe → 返回null让上层探测iframe；
+      // 无iframe或iframe worker → fall through到下方语义匹配
+      if (IS_TOP_FRAME && document.querySelectorAll("iframe").length > 0) {
+        console.log(`[BusinessGuide] 选择器 "${step.selector}" 在当前文档未命中，页面有iframe，交由上层探测...`);
+        return null;
+      }
+      // 无iframe或iframe worker：继续往下走语义匹配
     }
 
     if (!targetElement) {
-      console.log(`[BusinessGuide] 选择器 "${step.selector}" 缺失，正在启动本地语义匹配...`);
+      console.log(`[BusinessGuide] 选择器 "${step.selector}" 缺失或未命中，正在启动本地语义匹配...`);
       const semanticMatch = findBestSemanticMatch(step);
 
       if (semanticMatch) {
@@ -1164,8 +1186,6 @@
         console.warn("[BusinessGuide] 未能在页面中匹配到符合要求的元素");
         step.resolvedSelector = null;
       }
-    } else {
-      step.resolvedSelector = step.selector;
     }
 
     if (!targetElement) return null;
@@ -1599,7 +1619,7 @@
             <span class="gf-notify-title">${escapeHtml(f.title)}</span>
           </div>
         `).join("")}
-        <div class="gf-notify-hint">单击需要完成的流程前往该页面，然后请按<br/> <kbd>ALT</kbd> + <kbd>G</kbd> 开始页面流程引导</div>
+        <div class="gf-notify-hint">单击需要完成的流程前往该页面，然后请按<br/> <kbd>ALT</kbd> + <kbd>G</kbd> 开始页面流程引导。 如果页面不支持自动跳转，请自行前往。</div>
       </div>`;
     document.body.appendChild(container);
     flowNotificationEl = container;

@@ -425,8 +425,10 @@
 }
 .gf-notify-list {
   display: none;
-  max-height: 300px;
+  max-height: 400px;
   overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: #334155 transparent;
 }
 .gf-notify-list.gf-open {
   display: block;
@@ -455,9 +457,12 @@
   text-overflow: ellipsis;
 }
 .gf-notify-hint {
+  position: sticky;
+  bottom: 0;
   padding: 10px 14px;
   border-top: 1px solid rgba(255, 255, 255, 0.08);
-  color: #64748b;
+  background: rgba(15, 23, 42, 0.92);
+  color: #a3a5a9;
   font-size: 11px;
   text-align: center;
 }
