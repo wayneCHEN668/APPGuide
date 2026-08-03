@@ -45,7 +45,7 @@
 
   // 跨页流程运行时状态：存在 chrome.storage.local，仅记录"进行到哪一步了"，
   // 不存具体steps内容（那些每次都从API重新拉取，保证内容永远最新）
-  const FLOW_STATE_KEY = "guideFlowState";
+  const FLOW_STATE_KEY = "appguide_flowState";
   const FLOW_TTL_MS = 2 * 60 * 60 * 1000; // 2小时不活跃视为放弃
 
   // 注：API 地址由 popup 配置并存储在 chrome.storage，实际 fetch 由 background worker 代理执行
@@ -58,12 +58,12 @@
     Object.defineProperty(window, "__appguideDebug", {
       configurable: true,
       get() {
-        try { return localStorage.getItem("__appguideDebug") === "1"; } catch (e) { return false; }
+        try { return localStorage.getItem("appguide_debug") === "1"; } catch (e) { return false; }
       },
       set(val) {
         try {
-          if (val) localStorage.setItem("__appguideDebug", "1");
-          else localStorage.removeItem("__appguideDebug");
+          if (val) localStorage.setItem("appguide_debug", "1");
+          else localStorage.removeItem("appguide_debug");
         } catch (e) {
           // localStorage不可用（极少数受限环境），静默忽略，退回当次页面临时生效
         }
@@ -75,8 +75,8 @@
 
   console.log(
     IS_TOP_FRAME
-      ? "[BusinessGuide] 插件内容脚本已成功注入目标系统（顶层）。支持高级本地语义模糊匹配 + 跨页流程续接 + iframe内控件探测。"
-      : "[BusinessGuide] 插件内容脚本已注入iframe子文档，作为顶层的控件探测worker运行。"
+      ? "[BusinessGuide] 引导插件内容脚本已成功注入目标系统（顶层）。引导模式已就绪，快捷键：Alt+G"
+      : "[BusinessGuide] 引导插件内容脚本已注入iframe子文档，作为顶层的控件探测worker运行。"
   );
 
   if (IS_TOP_FRAME) {
@@ -109,6 +109,26 @@
       const state = await getFlowStateIfValid();
       if (!state) return;
 
+      // 缓存优先：以 state.pageIndex 为目标页，只比对这一页的 URL，避免跳到流程中其他页
+      if (state.cachedFlow) {
+        var targetIdx = (typeof state.pageIndex === "number") ? state.pageIndex : 0;
+        if (targetIdx >= 0 && targetIdx < state.cachedFlow.pages.length) {
+          var expectedPage = state.cachedFlow.pages[targetIdx];
+          if (urlsMatchClient(expectedPage.url, window.location.href)) {
+            var resolved = resolvePageByIndex(state.cachedFlow, targetIdx);
+            console.log("[BusinessGuide] 从本地缓存续接跨页流程：", state.flowId,
+              "（第" + (targetIdx + 1) + "/" + state.cachedFlow.pages.length + "页）");
+            startGuideFromResolved(resolved, state);
+            return;
+          }
+          // URL 不匹配 → 弹出确认框询问用户
+          console.log("[BusinessGuide] 当前 URL 与流程预期页面不匹配，弹出确认框");
+          showUrlMismatchDialog(state.cachedFlow, targetIdx, state);
+          return;
+        }
+        // pageIndex 异常，回退 API
+      }
+
       try {
         const data = await fetchGuideFromApi(getCleanPath(), state.flowId);
         if (data && data.success && data.mode === "resume") {
@@ -135,9 +155,12 @@
           console.log("[BusinessGuide] 检测到", flows.length, "个可用引导流程");
           renderFlowNotification(flows);
         }
-        // 结果为 0 时不渲染任何东西（旧通知已在上面清掉）
+        else {
+          // 结果为 0 时不渲染任何东西（旧通知已在上面清掉）
+          console.log("[BusinessGuide] 检测到", flows.length, "个可用引导流程 " + getCleanPath());
+        }
       } catch (e) {
-        console.warn("[BusinessGuide] refreshFlowNotification 失败:", e);
+        console.warn("[BusinessGuide] refreshFlowNotification 失败:", e);        
       }
     }
 
@@ -755,6 +778,58 @@
     });
   }
 
+  // 通过 /rest?method=appguide.flows.byid 获取完整 flow 数据并缓存到本地
+  // 返回归一化后的 { id, title, starturl, pages } 或 null（失败时）
+  function fetchFlowById(flowId) {
+    return new Promise(function(resolve) {
+      try {
+        chrome.runtime.sendMessage(
+          { action: "fetch-flow-by-id", flowId: flowId },
+          function(response) {
+            if (chrome.runtime.lastError) {
+              console.warn("[BusinessGuide] fetchFlowById 通信失败:", chrome.runtime.lastError.message);
+              resolve(null);
+              return;
+            }
+            if (response && response.success && response.data && response.data.success) {
+              resolve(normalizeFlowData(response.data.data));
+            } else {
+              console.warn("[BusinessGuide] fetchFlowById API 返回失败，将回退到 API 续接");
+              resolve(null);
+            }
+          }
+        );
+      } catch (e) {
+        console.warn("[BusinessGuide] fetchFlowById 异常:", e.message);
+        resolve(null);
+      }
+    });
+  }
+
+  // 归一化 /api/flows/by-id 返回的原始数据为标准格式
+  // rawData.steps 可能是：字符串(JSON)、数组(pages)、对象({pages:[],title:""})
+  function normalizeFlowData(rawData) {
+    if (!rawData) return null;
+    var stepsData = rawData.steps;
+    if (typeof stepsData === "string") {
+      try { stepsData = JSON.parse(stepsData); } catch (e) { stepsData = {}; }
+    }
+    var pages;
+    if (Array.isArray(stepsData)) {
+      pages = stepsData;
+    } else if (stepsData && Array.isArray(stepsData.pages)) {
+      pages = stepsData.pages;
+    } else {
+      pages = [];
+    }
+    return {
+      id: rawData.id,
+      title: (stepsData && stepsData.title) || rawData.class || "",
+      starturl: rawData.starturl || "",
+      pages: pages
+    };
+  }
+
   // 读取跨页流程运行时状态，并做TTL过期判断（过期则顺手清空，返回null）
   function getFlowStateIfValid() {
     return new Promise((resolve) => {
@@ -784,15 +859,19 @@
     });
   }
 
-  // 记录"接下来应该显示第几步"（globalStepNumber），每次渲染/翻页都要调用
-  function persistFlowState(nextGlobalStepNumber) {
+  // 记录"接下来应该显示第几步"（globalStepNumber + pageIndex），每次渲染/翻页都要调用
+  // nextPageIndex: 可选，跨页过渡时传入下一页索引；未传则使用当前 flowMeta.pageIndex
+  function persistFlowState(nextGlobalStepNumber, nextPageIndex) {
     if (!flowMeta) return;
+    var pageIndex = (nextPageIndex !== undefined) ? nextPageIndex : flowMeta.pageIndex;
     try {
       chrome.storage.local.set({
         [FLOW_STATE_KEY]: {
           flowId: flowMeta.flowId,
+          pageIndex: pageIndex,
           globalStepNumber: nextGlobalStepNumber,
           lastActiveAt: Date.now(),
+          cachedFlow: flowMeta.cachedFlow || null,
         },
       });
     } catch (e) {
@@ -812,6 +891,7 @@
   function getCleanPath() {
     return window.location.href
       .replace(/^https?:\/\//i, "")
+      .replace(/^www\./i, "")
       .replace(/[?#].*$/, "")
       .replace(/\/+$/, "");
       //.toLowerCase() || "/";
@@ -828,12 +908,160 @@
       .toLowerCase();
   }
 
+  // ------------------ 客户端 URL 匹配引擎（移植自 guide_server.ts）------------------
+  // 使客户端可以在不调用 API 的情况下，本地完成 URL→页面匹配，实现离线续接。
+
+  function parseUrlSafely(rawUrl) {
+    const withScheme = /^https?:\/\//i.test(rawUrl) ? rawUrl : `https://${rawUrl}`;
+    try {
+      return new URL(withScheme);
+    } catch {
+      return new URL("https://invalid.invalid");
+    }
+  }
+
+  function normalizeHost(rawUrl) {
+    try {
+      return parseUrlSafely(rawUrl).host.replace(/^www\./i, "").toLowerCase();
+    } catch {
+      return "";
+    }
+  }
+
+  function normalizePathSegments(rawUrl) {
+    try {
+      return parseUrlSafely(rawUrl).pathname.split("/").filter(Boolean);
+    } catch {
+      return rawUrl.split("/").filter(Boolean);
+    }
+  }
+
+  function looksLikeDynamicId(segment) {
+    if (!segment) return false;
+    if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(segment)) return true;
+    if (/^\d{6,}$/.test(segment)) return true;
+    if (segment.length >= 8 && /[a-zA-Z]/.test(segment) && /[0-9]/.test(segment)) return true;
+    return false;
+  }
+
+  function urlsMatchClient(rawUrlA, rawUrlB) {
+    if (normalizeHost(rawUrlA) !== normalizeHost(rawUrlB)) return false;
+    const segsA = normalizePathSegments(rawUrlA);
+    const segsB = normalizePathSegments(rawUrlB);
+    if (segsA.length !== segsB.length) return false;
+    for (let i = 0; i < segsA.length; i++) {
+      if (segsA[i] === segsB[i]) continue;
+      if (looksLikeDynamicId(segsA[i]) && looksLikeDynamicId(segsB[i])) continue;
+      return false;
+    }
+    return true;
+  }
+
+  // 在缓存的完整 flow 数据中，用当前 URL 匹配某一页，返回与 API 同构的 ResolvedPage
+  function resolvePageInFlowClient(cachedFlow, rawUrl) {
+    if (!cachedFlow || !cachedFlow.pages) return null;
+
+    let pageIndex = cachedFlow.pages.findIndex(function(p) { return urlsMatchClient(p.url, rawUrl); });
+
+    // 兜底：pages[].url 里没找到，但当前url就是 starturl
+    if (pageIndex === -1 && cachedFlow.pages.length > 0 && urlsMatchClient(cachedFlow.starturl, rawUrl)) {
+      pageIndex = 0;
+    }
+
+    if (pageIndex === -1) return null;
+
+    var globalStepOffset = 0;
+    for (var i = 0; i < pageIndex; i++) {
+      globalStepOffset += cachedFlow.pages[i].steps.length;
+    }
+    var totalSteps = cachedFlow.pages.reduce(function(sum, p) { return sum + p.steps.length; }, 0);
+
+    var page = cachedFlow.pages[pageIndex];
+    var steps = page.steps.map(function(s, localIndex) {
+      return Object.assign({}, s, {
+        localIndex: localIndex,
+        globalStepNumber: globalStepOffset + localIndex + 1
+      });
+    });
+
+    return {
+      flowId: cachedFlow.id,
+      flowTitle: cachedFlow.title,
+      pageIndex: pageIndex,
+      totalPages: cachedFlow.pages.length,
+      globalStepOffset: globalStepOffset,
+      totalSteps: totalSteps,
+      page: {
+        url: page.url,
+        title: page.title,
+        description: page.description,
+        steps: steps
+      }
+    };
+  }
+
+  // 不做 URL 匹配，直接按 pageIndex 返回该页的 ResolvedPage
+  // 用于 URL 不匹配但用户选择"继续引导"的场景
+  function resolvePageByIndex(cachedFlow, pageIndex) {
+    if (!cachedFlow || !cachedFlow.pages) return null;
+    if (pageIndex < 0 || pageIndex >= cachedFlow.pages.length) return null;
+
+    var globalStepOffset = 0;
+    for (var i = 0; i < pageIndex; i++) {
+      globalStepOffset += cachedFlow.pages[i].steps.length;
+    }
+    var totalSteps = cachedFlow.pages.reduce(function(sum, p) { return sum + p.steps.length; }, 0);
+
+    var page = cachedFlow.pages[pageIndex];
+    var steps = page.steps.map(function(s, localIndex) {
+      return Object.assign({}, s, {
+        localIndex: localIndex,
+        globalStepNumber: globalStepOffset + localIndex + 1
+      });
+    });
+
+    return {
+      flowId: cachedFlow.id,
+      flowTitle: cachedFlow.title,
+      pageIndex: pageIndex,
+      totalPages: cachedFlow.pages.length,
+      globalStepOffset: globalStepOffset,
+      totalSteps: totalSteps,
+      page: {
+        url: page.url,
+        title: page.title,
+        description: page.description,
+        steps: steps
+      }
+    };
+  }
+
   // 核心功能：开关引导（用户手动按 Alt+G 触发）
   async function enableGuide() {
     const cleanPath = getCleanPath();
     console.log("[BusinessGuide] 正在检测页面并获取 API 校验...", cleanPath);
 
     const state = await getFlowStateIfValid();
+
+    // 缓存优先：以 state.pageIndex 为目标页，只比对这一页的 URL，避免跳到流程中其他页
+    if (state && state.cachedFlow) {
+      var targetIdx = (typeof state.pageIndex === "number") ? state.pageIndex : 0;
+      if (targetIdx >= 0 && targetIdx < state.cachedFlow.pages.length) {
+        var expectedPage = state.cachedFlow.pages[targetIdx];
+        if (urlsMatchClient(expectedPage.url, window.location.href)) {
+          var resolved = resolvePageByIndex(state.cachedFlow, targetIdx);
+          console.log("[BusinessGuide] 从本地缓存续接跨页流程（手动 Alt+G）：", state.flowId,
+            "（第" + (targetIdx + 1) + "/" + state.cachedFlow.pages.length + "页）");
+          startGuideFromResolved(resolved, state);
+          return;
+        }
+        // URL 不匹配 → 弹出确认框询问用户
+        console.log("[BusinessGuide] 手动 Alt+G：当前 URL 与流程预期页面不匹配，弹出确认框");
+        showUrlMismatchDialog(state.cachedFlow, targetIdx, state);
+        return;
+      }
+      // pageIndex 异常，回退 API
+    }
 
     try {
       const data = await fetchGuideFromApi(cleanPath, state ? state.flowId : null);
@@ -860,6 +1088,12 @@
 
     if (!manual) return; // 被动检测：非resume结果一律静默忽略
 
+    // 如果有进行中的流程但 API 返回的不是 resume，阻止回退到"启动新流程"路径
+    if (state) {
+      showToast("💡 当前页面不在流程路径中，请导航到正确页面后重试。");
+      return;
+    }
+
     if (data.success && data.mode === "new") {
       startGuideFromResolved(data, null);
       return;
@@ -875,17 +1109,20 @@
     showToast("❌ 业务指南网络服务端点连接失败");
   }
 
-  // 根据 /api/guide 返回的已解析页面数据，启动/续接引导渲染
+  // 根据 /api/guide 返回的已解析页面数据（或客户端本地解析结果），启动/续接引导渲染
   // resumeState：仅当data.mode==="resume"且是从storage续接来的时候传入，
   // 用于把之前存的globalStepNumber换算成这一页内的localIndex，从而精确停在原来的步骤上；
   // 否则（全新流程/用户手动选择流程）一律从这一页第一步开始。
   function startGuideFromResolved(data, resumeState) {
+    // 优先继承已有缓存，其次从本次 API 响应中获取（暂未有 fullFlow 字段，预留）
+    var inheritedCache = (resumeState && resumeState.cachedFlow) || data.fullFlow || null;
     flowMeta = {
       flowId: data.flowId,
       pageIndex: data.pageIndex,
       totalPages: data.totalPages,
       globalStepOffset: data.globalStepOffset,
       totalSteps: data.totalSteps,
+      cachedFlow: inheritedCache,
     };
     activeGuide = {
       title: data.flowTitle,
@@ -917,6 +1154,112 @@
     persistFlowState(activeGuide.steps[currentStepIndex].globalStepNumber);
     console.log("[BusinessGuide] 已加载业务流程指南：" + activeGuide.title +
       `（第${data.pageIndex + 1}/${data.totalPages}页，步骤${activeGuide.steps[currentStepIndex].globalStepNumber}/${data.totalSteps}）`);
+
+    // 如果还没有缓存完整流程数据，异步获取并缓存（fire-and-forget，不阻塞当前渲染）
+    if (!flowMeta.cachedFlow && data.flowId) {
+      fetchFlowById(data.flowId).then(function(cached) {
+        if (cached && flowMeta) {
+          flowMeta.cachedFlow = cached;
+          // 更新存储中的 cachedFlow
+          persistFlowState(activeGuide.steps[currentStepIndex].globalStepNumber);
+          console.log("[BusinessGuide] 完整流程数据已缓存到本地，共 " + cached.pages.length + " 页");
+        }
+      }).catch(function() {
+        // 静默忽略，续接时回退 API
+      });
+    }
+  }
+
+  // 使浮动窗口可拖动：给 header 区域绑定 mousedown/move/up 事件
+  function makeDraggable(dragHandle, targetElement) {
+    var startX, startY, startLeft, startTop;
+    var dragging = false;
+
+    dragHandle.style.cursor = "move";
+
+    dragHandle.addEventListener("mousedown", function(e) {
+      if (e.target.tagName === "BUTTON") return; // 不拦截按钮点击
+      dragging = true;
+      startX = e.clientX;
+      startY = e.clientY;
+      startLeft = parseInt(targetElement.style.left, 10) || 0;
+      startTop = parseInt(targetElement.style.top, 10) || 0;
+      targetElement.style.transform = ""; // 清除居中偏移
+      e.preventDefault();
+    });
+
+    document.addEventListener("mousemove", function(e) {
+      if (!dragging) return;
+      var dx = e.clientX - startX;
+      var dy = e.clientY - startY;
+      targetElement.style.left = Math.max(0, startLeft + dx) + "px";
+      targetElement.style.top = Math.max(0, startTop + dy) + "px";
+    });
+
+    document.addEventListener("mouseup", function() {
+      dragging = false;
+    });
+  }
+
+  // URL 不匹配确认框：缓存续接时当前页面 URL 与流程预期页面不一致，让用户选择继续或放弃
+  function showUrlMismatchDialog(cachedFlow, expectedPageIndex, state) {
+    cleanupUI();
+
+    var expectedPage = cachedFlow.pages[expectedPageIndex];
+    var expectedUrl = expectedPage ? expectedPage.url : "（未知）";
+    var currentUrl = window.location.href;
+
+    bubbleElement = document.createElement("div");
+    bubbleElement.className = "guide-extension-bubble";
+    bubbleElement.innerHTML =
+      '<div class="guide-header">' +
+        '<span><img src="' + ICON_URL + '" style="width:16px;height:16px;vertical-align:middle;margin-right:6px;">智导业务操作领航</span>' +
+        '<button id="guide-close-btn" class="guide-btn-close">×</button>' +
+      '</div>' +
+      '<div class="guide-body">' +
+        '<h3 class="guide-step-title">⚠ 页面不匹配</h3>' +
+        '<p class="guide-step-desc">当前页面 URL 与流程预期不符：</p>' +
+        '<div style="margin:8px 0;padding:8px;border-radius:4px;font-size:12px;line-height:1.6;">' +
+          '<div><strong>流程：</strong>' + escapeHtml(cachedFlow.title) + '</div>' +
+          '<div><strong>预期页面（第' + (expectedPageIndex + 1) + '/' + cachedFlow.pages.length + '页）：</strong>' + escapeHtml(expectedUrl) + '</div>' +
+          '<div style="word-break:break-all;"><strong>当前页面：</strong>' + escapeHtml(currentUrl) + '</div>' +
+        '</div>' +
+        '<p class="guide-step-desc">是否仍要继续引导？</p>' +
+        '<div class="guide-mismatch-actions">' +
+          '<button id="guide-mismatch-abort" class="guide-mismatch-btn">中止引导流程</button>' +
+          '<button id="guide-mismatch-continue" class="guide-mismatch-btn-primary">继续当前页面</button>' +
+        '</div>' +
+      '</div>';
+    document.body.appendChild(bubbleElement);
+
+    document.getElementById("guide-close-btn").onclick = function() {
+      // 关闭 = 放弃，保留进度
+      cleanupUI();
+      showToast("引导已取消，请导航到正确页面后重试。");
+    };
+
+    document.getElementById("guide-mismatch-abort").onclick = function() {
+      cleanupUI();
+      clearFlowState();
+      showToast("引导流程已中止，本地进度已清除。");
+    };
+
+    document.getElementById("guide-mismatch-continue").onclick = function() {
+      cleanupUI();
+      var resolved = resolvePageByIndex(cachedFlow, expectedPageIndex);
+      if (resolved) {
+        console.log("[BusinessGuide] 用户选择在 URL 不匹配的情况下继续引导");
+        startGuideFromResolved(resolved, state);
+      } else {
+        showToast("❌ 无法加载预期页面数据");
+      }
+    };
+
+    positionBubble(null, "top");
+
+    // 启用拖动：按住标题栏可拖动整个浮动窗口
+    var headerEl = bubbleElement.querySelector(".guide-header");
+    if (headerEl) makeDraggable(headerEl, bubbleElement);
   }
 
   // 多个流程共享同一起始页时，展示候选列表让用户选择
@@ -961,6 +1304,10 @@
     });
 
     positionBubble(null, "top");
+
+    // 启用拖动
+    var headerEl2 = bubbleElement.querySelector(".guide-header");
+    if (headerEl2) makeDraggable(headerEl2, bubbleElement);
   }
 
   function disableGuide() {
@@ -1534,7 +1881,7 @@
       // 本页步骤已走完，但流程还有后续页面——不清空流程进度，只收起当前UI，
       // 等用户跳转到下一页（真实业务系统的页面跳转）后，被动型自动续接逻辑会接上。
       const lastGlobalNum = activeGuide.steps[currentStepIndex].globalStepNumber;
-      persistFlowState(lastGlobalNum + 1);
+      persistFlowState(lastGlobalNum + 1, flowMeta.pageIndex + 1);
       showToast("✅ 本页操作已完成，请前往下一步骤对应页面，按 Alt+G 继续引导。");
       isGuideActive = false;
       activeGuide = null;
@@ -1606,7 +1953,7 @@
     container.className = "guide-extension-flow-notify";
     container.innerHTML =
       `<div class="gf-notify-header">
-        <span>当前页面及子页面有 <strong>${flows.length}</strong> 个引导流程</span>
+        <span>当前页及子页面有 <strong>${flows.length}</strong> 个引导流程</span>
         <div class="gf-notify-header-right">
           <span class="gf-notify-arrow">▾</span>
           <button class="gf-notify-close-btn" title="关闭">×</button>

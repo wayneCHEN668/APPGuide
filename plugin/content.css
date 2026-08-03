@@ -186,6 +186,52 @@
   line-height: 1.4 !important;
 }
 
+/* ------------------ URL 不匹配确认框按钮 ------------------ */
+
+.guide-mismatch-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.guide-mismatch-btn {
+  flex: 1;
+  background: #f0f0f0;
+  color: #333;
+  text-align: center;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid #ccc;
+  padding: 8px 12px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.guide-mismatch-btn:hover {
+  background: #e0e0e0;
+}
+
+.guide-mismatch-btn-primary {
+  flex: 1;
+  background: #4a90d9;
+  color: #fff;
+  text-align: center;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  padding: 8px 12px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.guide-mismatch-btn-primary:hover {
+  background: #3a7bc8;
+}
+
 /* ------------------ 高亮遮罩覆盖层 ------------------ */
 .guide-extension-highlight {
   position: absolute;

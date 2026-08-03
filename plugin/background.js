@@ -29,8 +29,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     const cleanPath = message.url;
     const flowId = message.flowId || "";
 
-    chrome.storage.local.get(["apiBaseUrl"], (result) => {
-      const apiBaseUrl = result.apiBaseUrl || "api.skillcloud.cn";
+    chrome.storage.local.get(["appguide_apiBaseUrl"], (result) => {
+      const apiBaseUrl = result.appguide_apiBaseUrl || "api.skillcloud.cn";
       // 自动补全 http:// 协议前缀
       const baseUrl = /^https?:\/\//i.test(apiBaseUrl) ? apiBaseUrl : `http://${apiBaseUrl}`;
       // 生产环境统一使用 REST 风格 method 参数
@@ -59,8 +59,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.action === "fetch-flows-by-pattern") {
     const cleanPath = message.url;
 
-    chrome.storage.local.get(["apiBaseUrl"], (result) => {
-      const apiBaseUrl = result.apiBaseUrl || "api.skillcloud.cn";
+    chrome.storage.local.get(["appguide_apiBaseUrl"], (result) => {
+      const apiBaseUrl = result.appguide_apiBaseUrl || "api.skillcloud.cn";
       const baseUrl = /^https?:\/\//i.test(apiBaseUrl) ? apiBaseUrl : `http://${apiBaseUrl}`;
       const fetchUrl = `${baseUrl}/rest?method=appguide.flows.bypattern&url=${encodeURIComponent(cleanPath)}`;
 
@@ -81,8 +81,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.action === "track-stats") {
     const { flowId, type } = message;
 
-    chrome.storage.local.get(["apiBaseUrl"], (result) => {
-      const apiBaseUrl = result.apiBaseUrl || "api.skillcloud.cn";
+    chrome.storage.local.get(["appguide_apiBaseUrl"], (result) => {
+      const apiBaseUrl = result.appguide_apiBaseUrl || "api.skillcloud.cn";
       const baseUrl = /^https?:\/\//i.test(apiBaseUrl) ? apiBaseUrl : `http://${apiBaseUrl}`;
       const fetchUrl = `${baseUrl}/rest?method=appguide.flows.stats&id=${encodeURIComponent(flowId)}&type=${encodeURIComponent(type)}`;
 
@@ -93,6 +93,28 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         .then(data => sendResponse({ success: true, data }))
         .catch(err => {
           console.error("[Background] 更新流程统计失败:", err);
+          sendResponse({ success: false, error: err.message });
+        });
+    });
+
+    return true;
+  }
+
+  if (message.action === "fetch-flow-by-id") {
+    const flowId = message.flowId || "";
+
+    chrome.storage.local.get(["appguide_apiBaseUrl"], (result) => {
+      const apiBaseUrl = result.appguide_apiBaseUrl || "api.skillcloud.cn";
+      const baseUrl = /^https?:\/\//i.test(apiBaseUrl) ? apiBaseUrl : `http://${apiBaseUrl}`;
+      const fetchUrl = `${baseUrl}/rest?method=appguide.flows.byid&id=${encodeURIComponent(flowId)}`;
+
+      console.log("[Background] 代理获取完整流程数据:", fetchUrl);
+
+      fetch(fetchUrl)
+        .then(res => res.json())
+        .then(data => sendResponse({ success: true, data }))
+        .catch(err => {
+          console.error("[Background] 获取完整流程数据失败:", err);
           sendResponse({ success: false, error: err.message });
         });
     });
