@@ -10,6 +10,7 @@
     "start": "node dist/server.cjs",
     "start:guide": "node dist/guide_server.cjs",
     "build:plugin": "node scripts/build-plugin.mjs",
+    "build:plugin-review": "node scripts/build-plugin.mjs plugin-review",
     "clean": "rm -rf dist server.js",
     "lint": "tsc --noEmit",
     "dev:guide": "tsx guide_server.ts"

@@ -1,0 +1,53 @@
+{
+  "manifest_version": 3,
+  "name": "智导操作领航流程审核",
+  "version": "1.0.0",
+  "description": "人工审核插件：加载页面引导流程，人工逐步确认/修正DOM定位，完成后将selector回填至引导文件。",
+  "permissions": [
+    "activeTab",
+    "storage"
+  ],
+  "host_permissions": [
+    "http://localhost:3010/*",
+    "http://81.69.17.148:3010/*",
+    "https://api.skillcloud.cn/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "all_frames": true,
+      "js": ["content.js"],
+      "css": ["content.css"]
+    }
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon_16x16.png",
+      "32": "icons/icon_32x32.png"
+    }
+  },
+  "commands": {
+    "toggle-guide": {
+      "suggested_key": {
+        "default": "Alt+C",
+        "mac": "Alt+C"
+      },
+      "description": "呼出/关闭当前业务操作引导审核流程"
+    }
+  },
+  "icons": {
+    "16": "icons/icon_16x16.png",
+    "48": "icons/icon_48x48.png",
+    "128": "icons/icon_128x128.png"
+  },
+  "web_accessible_resources": [
+    {
+      "resources": ["icons/icon_16t.png"],
+      "matches": ["<all_urls>"]
+    }
+  ]
+}

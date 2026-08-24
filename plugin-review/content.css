@@ -1,0 +1,737 @@
+/* ------------------ 动态引导悬浮窗气泡 ------------------ */
+.guide-review-extension-bubble {
+  position: absolute;
+  z-index: 10000000;
+  width: 320px;
+  background-color: rgba(30, 18, 52, 0.8) !important;
+  border: 1px solid rgba(139, 92, 246, 0.4) !important;
+  border-radius: 12px !important;
+  box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.5), 0 10px 10px -5px rgba(0, 0, 0, 0.4) !important;
+  font-family: "Microsoft YaHei", "微软雅黑", sans-serif !important;
+  color: #f1f5f9 !important;
+  overflow: hidden;
+  transition: opacity 0.2s ease-in-out;
+}
+
+.guide-review-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px;
+  background-color: #0d0820 !important;
+  border-bottom: 1px solid #2d1f45 !important;
+  cursor: grab;
+  user-select: none;
+}
+
+.guide-review-header:active {
+  cursor: grabbing;
+}
+
+.guide-review-header span {
+  font-size: 11px !important;
+  font-weight: 700 !important;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: #94a3b8 !important;
+}
+
+.guide-review-btn-close {
+  background: none !important;
+  border: none !important;
+  color: #64748b !important;
+  font-size: 18px !important;
+  cursor: pointer !important;
+  line-height: 1 !important;
+  padding: 0 !important;
+}
+
+.guide-review-btn-close:hover {
+  color: #f1f5f9 !important;
+}
+
+.guide-review-body {
+  padding: 14px !important;
+}
+
+.guide-review-step-title {
+  margin: 0 0 6px 0 !important;
+  font-size: 14px !important;
+  font-weight: 700 !important;
+  color: #ffffff !important;
+  display: flex;
+  align-items: center;
+}
+
+.guide-review-step-num {
+  font-size: 10px !important;
+  font-family: "Microsoft YaHei", "微软雅黑", sans-serif !important;
+  background-color: #1e1b4b !important;
+  border: 1px solid rgba(99, 102, 241, 0.4) !important;
+  color: #818cf8 !important;
+  padding: 2px 6px !important;
+  border-radius: 4px !important;
+  margin-right: 8px !important;
+  font-weight: bold !important;
+}
+
+.guide-review-step-desc {
+  margin: 0 !important;
+  font-size: 12px !important;
+  line-height: 1.5 !important;
+  color: #cbd5e1 !important;
+}
+
+/* ---- 可编辑标题输入框 ---- */
+.guide-review-input-title {
+  display: block !important;
+  width: 100% !important;
+  box-sizing: border-box !important;
+  margin: 6px 0 8px 0 !important;
+  padding: 6px 8px !important;
+  font-size: 13px !important;
+  font-weight: 600 !important;
+  color: #ffffff !important;
+  background-color: rgba(30, 18, 52, 0.7) !important;
+  border: 1px solid rgba(99, 102, 241, 0.3) !important;
+  border-radius: 6px !important;
+  outline: none !important;
+  font-family: "Microsoft YaHei", "微软雅黑", sans-serif !important;
+  transition: border-color 0.15s ease !important;
+}
+
+.guide-review-input-title:focus {
+  border-color: #7c3aed !important;
+  box-shadow: 0 0 0 2px rgba(124, 58, 237, 0.2) !important;
+}
+
+.guide-review-input-title::placeholder {
+  color: #6b7280 !important;
+}
+
+/* ---- 可编辑描述文本框 ---- */
+.guide-review-textarea-desc {
+  display: block !important;
+  width: 100% !important;
+  box-sizing: border-box !important;
+  margin: 0 0 8px 0 !important;
+  padding: 6px 8px !important;
+  font-size: 12px !important;
+  line-height: 1.5 !important;
+  color: #cbd5e1 !important;
+  background-color: rgba(30, 18, 52, 0.7) !important;
+  border: 1px solid rgba(99, 102, 241, 0.3) !important;
+  border-radius: 6px !important;
+  outline: none !important;
+  font-family: "Microsoft YaHei", "微软雅黑", sans-serif !important;
+  resize: vertical !important;
+  min-height: 56px !important;
+  transition: border-color 0.15s ease !important;
+}
+
+.guide-review-textarea-desc:focus {
+  border-color: #7c3aed !important;
+  box-shadow: 0 0 0 2px rgba(124, 58, 237, 0.2) !important;
+}
+
+.guide-review-textarea-desc::placeholder {
+  color: #6b7280 !important;
+}
+
+/* ---- 步骤编号头 ---- */
+.guide-review-step-header {
+  margin-bottom: 4px !important;
+}
+
+.guide-review-meta {
+  margin-top: 10px !important;
+  font-size: 10px !important;
+  font-family: "Microsoft YaHei", "微软雅黑", sans-serif !important;
+  color: #a0a4ac !important;
+}
+
+.guide-review-meta code {
+  color: #94a3b8 !important;
+}
+
+.guide-review-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px !important;
+  background-color: #0d0820/50 !important;
+  border-top: 1px solid #2d1f45 !important;
+  gap: 8px !important;
+  flex-wrap: wrap !important;
+}
+
+.guide-review-progress {
+  font-size: 10px !important;
+  font-family: "Microsoft YaHei", "微软雅黑", sans-serif !important;
+  color: #bcbdbf !important;
+}
+
+.guide-review-actions {
+  display: flex;
+  gap: 6px !important;
+}
+
+.guide-review-btn-nav, .guide-review-btn-primary {
+  padding: 4px 10px !important;
+  font-size: 11px !important;
+  font-weight: 600 !important;
+  border-radius: 6px !important;
+  cursor: pointer !important;
+  border: none !important;
+  transition: all 0.15s ease !important;
+}
+
+.guide-review-btn-nav {
+  background-color: #2d1f45 !important;
+  color: #cbd5e1 !important;
+  border: 1px solid #3d2d5c !important;
+}
+
+.guide-review-btn-nav:hover:not(:disabled) {
+  background-color: #3d2d5c !important;
+  color: #f1f5f9 !important;
+}
+
+.guide-review-btn-nav:disabled {
+  opacity: 0.3 !important;
+  cursor: not-allowed !important;
+}
+
+.guide-review-btn-primary {
+  background-color: #7c3aed !important;
+  color: #ffffff !important;
+}
+
+.guide-review-btn-primary:hover {
+  background-color: #8b5cf6 !important;
+}
+
+/* ---- 导航按钮组（上一步/删除/下一步） ---- */
+.guide-review-nav-group {
+  display: flex;
+  gap: 6px !important;
+  align-items: center;
+}
+
+/* ---- 删除步骤按钮 ---- */
+.guide-review-btn-delete {
+  padding: 4px 10px !important;
+  font-size: 11px !important;
+  font-weight: 600 !important;
+  border-radius: 6px !important;
+  cursor: pointer !important;
+  border: 1px solid #dc2626 !important;
+  transition: all 0.15s ease !important;
+  background-color: transparent !important;
+  color: #fca5a5 !important;
+}
+
+.guide-review-btn-delete:hover {
+  background-color: rgba(220, 38, 38, 0.15) !important;
+  color: #fecaca !important;
+}
+
+/* ------------------ 审核模式按钮组 ------------------ */
+.guide-review-actions {
+  display: flex;
+  gap: 6px !important;
+  padding: 8px 14px !important;
+  border-top: 1px solid #2d1f45 !important;
+  background-color: rgba(15, 5, 30, 0.5) !important;
+}
+
+.guide-review-btn-confirm {
+  padding: 5px 12px !important;
+  font-size: 11px !important;
+  font-weight: 600 !important;
+  border-radius: 6px !important;
+  cursor: pointer !important;
+  border: none !important;
+  transition: all 0.15s ease !important;
+  background-color: #16a34a !important;
+  color: #ffffff !important;
+  flex: 1 !important;
+}
+
+.guide-review-btn-confirm:hover {
+  background-color: #22c55e !important;
+}
+
+.guide-review-btn-confirm:disabled {
+  opacity: 0.4 !important;
+  cursor: not-allowed !important;
+}
+
+.guide-review-btn-confirm.confirmed {
+  background-color: #2d1f45 !important;
+  border: 1px solid #16a34a !important;
+  color: #86efac !important;
+}
+
+.guide-review-btn-correct {
+  padding: 5px 12px !important;
+  font-size: 11px !important;
+  font-weight: 600 !important;
+  border-radius: 6px !important;
+  cursor: pointer !important;
+  border: 1px solid #f59e0b !important;
+  transition: all 0.15s ease !important;
+  background-color: transparent !important;
+  color: #fbbf24 !important;
+  flex: 1 !important;
+}
+
+.guide-review-btn-correct:hover {
+  background-color: rgba(245, 158, 11, 0.15) !important;
+  color: #fcd34d !important;
+}
+
+.guide-review-btn-correct:disabled {
+  opacity: 0.4 !important;
+  cursor: not-allowed !important;
+}
+
+.guide-review-selector-display {
+  font-size: 10px !important;
+  font-family: "Microsoft YaHei", "微软雅黑", sans-serif !important;
+  color: #86efac !important;
+  padding: 4px 8px !important;
+  background: rgba(22, 163, 74, 0.1) !important;
+  border-radius: 4px !important;
+  margin-top: 6px !important;
+  word-break: break-all !important;
+  display: none;
+}
+
+.guide-review-selector-display.visible {
+  display: block !important;
+}
+
+/* ------------------ 取件模式（Pick Mode）悬停高亮 ------------------ */
+.guide-review-pick-hover {
+  position: fixed !important;
+  pointer-events: none !important;
+  z-index: 9999998 !important;
+  border: 2px dashed #f59e0b !important;
+  border-radius: 4px !important;
+  background-color: rgba(245, 158, 11, 0.08) !important;
+  transition: all 0.08s ease-out !important;
+  box-shadow: 0 0 12px rgba(245, 158, 11, 0.3) !important;
+}
+
+/* 取件模式确认框 */
+.guide-review-pick-confirm {
+  position: absolute;
+  z-index: 10000001;
+  background: rgba(30, 18, 52, 0.92);
+  border: 1px solid rgba(245, 158, 11, 0.5);
+  border-radius: 8px;
+  padding: 8px 12px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+  font-size: 11px;
+  color: #f1f5f9;
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.guide-review-pick-confirm button {
+  padding: 3px 10px;
+  font-size: 11px;
+  font-weight: 600;
+  border-radius: 4px;
+  cursor: pointer;
+  border: none;
+}
+
+.guide-review-pick-confirm .guide-review-pick-yes {
+  background: #16a34a;
+  color: #fff;
+}
+
+.guide-review-pick-confirm .guide-review-pick-no {
+  background: #2d1f45;
+  color: #94a3b8;
+  border: 1px solid #3d2d5c;
+}
+
+/* 取件模式遮罩提示 */
+.guide-review-pick-overlay-hint {
+  position: fixed;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 10000003;
+  background: rgba(245, 158, 11, 0.9);
+  color: #000;
+  padding: 6px 16px;
+  border-radius: 20px;
+  font-size: 12px;
+  font-weight: 600;
+  font-family: "Microsoft YaHei", "微软雅黑", sans-serif;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+  animation: guideReviewPickHintPulse 1.5s ease-in-out infinite;
+}
+
+@keyframes guideReviewPickHintPulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.85; }
+}
+
+/* ------------------ 多流程候选选择列表 ------------------ */
+.guide-review-candidate-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px !important;
+  margin-top: 10px !important;
+  max-height: calc(70vh - 110px);
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: #3d2d5c transparent;
+}
+
+.guide-review-candidate-item {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start !important;
+  gap: 2px !important;
+  width: 100%;
+  text-align: left !important;
+  background-color: #2d1f45 !important;
+  border: 1px solid #3d2d5c !important;
+  border-radius: 8px !important;
+  padding: 8px 10px !important;
+  cursor: pointer !important;
+  transition: all 0.15s ease !important;
+}
+
+.guide-review-candidate-item:hover {
+  background-color: #3d2d5c !important;
+  border-color: #8b5cf6 !important;
+}
+
+.guide-review-candidate-item strong {
+  font-size: 12px !important;
+  color: #f1f5f9 !important;
+  font-weight: 700 !important;
+}
+
+.guide-review-candidate-item span {
+  font-size: 11px !important;
+  color: #94a3b8 !important;
+  line-height: 1.4 !important;
+}
+
+/* ------------------ 高亮遮罩覆盖层 ------------------ */
+.guide-review-extension-highlight {
+  position: absolute;
+  pointer-events: none;
+  z-index: 9999999;
+  border-radius: 6px;
+  transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+@keyframes guideReviewExtensionPulse {
+  0%, 100% { box-shadow: 0 0 0 0px rgba(139, 92, 246, 0.7); }
+  50% { box-shadow: 0 0 0 8px rgba(139, 92, 246, 0); }
+}
+@keyframes guideReviewExtensionSolid {
+  0%, 100% { box-shadow: 0 0 0 2px rgba(239, 68, 68, 0.8); }
+  50% { box-shadow: 0 0 0 4px rgba(239, 68, 68, 0.4); }
+}
+
+.guide-review-style-pulse {
+  border: 2px solid #8b5cf6 !important;
+  animation: guideReviewExtensionPulse 1.5s infinite;
+}
+
+.guide-review-style-solid {
+  border: 2px solid #ef4444 !important;
+  animation: guideReviewExtensionSolid 2s infinite;
+}
+
+.guide-review-style-glow {
+  border: 2px dashed #f59e0b !important;
+  box-shadow: 0 0 15px #f59e0b !important;
+}
+
+/* 审核模式已确认的高亮样式 */
+.guide-review-style-confirmed {
+  border: 2px solid #16a34a !important;
+  box-shadow: 0 0 12px rgba(22, 163, 74, 0.5) !important;
+}
+
+/* ------------------ 通知小吐司 ------------------ */
+.guide-review-extension-toast {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 10000001;
+  background-color: #2d1f45;
+  border: 1px solid #8b5cf6;
+  color: #ffffff;
+  padding: 10px 20px;
+  border-radius: 10px;
+  font-size: 12px;
+  font-weight: 500;
+  box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.3);
+  opacity: 0;
+  scale: 0.9;
+  transition: opacity 0.3s ease, scale 0.3s cubic-bezier(0.18, 0.89, 0.32, 1.28);
+}
+
+.guide-review-extension-toast.show {
+  opacity: 1;
+  scale: 1;
+}
+
+/* ------------------ 目标未找到确认对话框 ------------------ */
+.guide-review-confirm-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 10000002;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+}
+
+.guide-review-confirm-dialog {
+  width: 340px;
+  max-width: 90vw;
+  background-color: rgba(30, 18, 52, 0.95) !important;
+  border: 1px solid rgba(139, 92, 246, 0.35) !important;
+  border-radius: 14px !important;
+  box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.6) !important;
+  overflow: hidden;
+  pointer-events: auto;
+  animation: guideReviewDialogSlideUp 0.2s cubic-bezier(0.18, 0.89, 0.32, 1.28);
+}
+
+@keyframes guideReviewDialogSlideUp {
+  from { opacity: 0; transform: translateY(12px) scale(0.96); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+.guide-review-confirm-header {
+  padding: 14px 16px 0 16px !important;
+  display: flex;
+  align-items: flex-start;
+  gap: 10px !important;
+  cursor: move;
+}
+
+.guide-review-confirm-icon {
+  font-size: 22px;
+  line-height: 1;
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+
+.guide-review-confirm-title {
+  font-size: 13px !important;
+  font-weight: 700 !important;
+  color: #f1f5f9 !important;
+  margin: 0 0 4px 0 !important;
+}
+
+.guide-review-confirm-desc {
+  font-size: 12px !important;
+  color: #94a3b8 !important;
+  line-height: 1.5 !important;
+  margin: 0 !important;
+}
+
+.guide-review-confirm-step-name {
+  color: #facc15 !important;
+  font-weight: 600 !important;
+}
+
+.guide-review-confirm-actions {
+  display: flex;
+  gap: 8px !important;
+  padding: 14px 16px !important;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+}
+
+.guide-review-confirm-actions button {
+  padding: 6px 14px !important;
+  font-size: 12px !important;
+  font-weight: 600 !important;
+  border-radius: 7px !important;
+  cursor: pointer !important;
+  border: none !important;
+  transition: all 0.15s ease !important;
+}
+
+.guide-review-btn-abort {
+  background-color: #2d1f45 !important;
+  color: #94a3b8 !important;
+  border: 1px solid #3d2d5c !important;
+}
+
+.guide-review-btn-abort:hover {
+  background-color: #7f1d1d !important;
+  border-color: #dc2626 !important;
+  color: #fca5a5 !important;
+}
+
+.guide-review-btn-skip {
+  background-color: #7c3aed !important;
+  color: #ffffff !important;
+}
+
+.guide-review-btn-skip:hover {
+  background-color: #8b5cf6 !important;
+}
+
+.guide-review-btn-manual {
+  background-color: #059669 !important;
+  color: #ffffff !important;
+}
+
+.guide-review-btn-manual:hover {
+  background-color: #10b981 !important;
+}
+
+.guide-review-btn-delete-step {
+  background-color: #dc2626 !important;
+  color: #ffffff !important;
+}
+
+.guide-review-btn-delete-step:hover {
+  background-color: #ef4444 !important;
+}
+
+/* ------------------ 暗色滚动条（Chrome/Edge） ------------------ */
+.guide-review-candidate-list::-webkit-scrollbar {
+  width: 5px;
+}
+
+.guide-review-candidate-list::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.guide-review-candidate-list::-webkit-scrollbar-thumb {
+  background-color: #3d2d5c;
+  border-radius: 10px;
+}
+
+.guide-review-candidate-list::-webkit-scrollbar-thumb:hover {
+  background-color: #5b4580;
+}
+
+/* ------------------ 可用流程浮动通知 ------------------ */
+.guide-review-extension-flow-notify {
+  position: fixed;
+  top: 16px;
+  left: 16px;
+  z-index: 2147483647;
+  width: 280px;
+  background: rgba(30, 18, 52, 0.7);
+  border: 1px solid rgba(139, 92, 246, 0.35);
+  border-radius: 10px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+  font-family: "Microsoft YaHei", "微软雅黑", sans-serif;
+  color: #e2e8f0;
+  font-size: 13px;
+  overflow: hidden;
+  transition: box-shadow 0.2s;
+}
+.guide-review-extension-flow-notify:hover {
+  box-shadow: 0 12px 32px rgba(139, 92, 246, 0.25);
+}
+.gf-review-notify-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px;
+  cursor: move;
+  background: rgba(52, 28, 82, 0.6);
+  user-select: none;
+}
+.gf-review-notify-header strong {
+  color: #a78bfa;
+}
+.gf-review-notify-header-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.gf-review-notify-arrow {
+  color: #a78bfa;
+  font-size: 12px;
+  transition: transform 0.2s;
+}
+.gf-review-notify-close-btn {
+  background: none;
+  border: none;
+  color: #94a3b8;
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 2px;
+  border-radius: 4px;
+  transition: color 0.15s, background 0.15s;
+}
+.gf-review-notify-close-btn:hover {
+  color: #fff;
+  background: rgba(255, 255, 255, 0.1);
+}
+.gf-review-notify-body {
+  display: none;
+}
+.gf-review-notify-body.gf-review-open {
+  display: block;
+}
+.gf-review-notify-list {
+  max-height: 400px;
+  overflow-y: auto;
+}
+.gf-review-notify-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 14px;
+  cursor: pointer;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  transition: background 0.15s;
+}
+.gf-review-notify-item:hover {
+  background: rgba(139, 92, 246, 0.15);
+}
+.gf-review-notify-index {
+  color: #64748b;
+  font-size: 12px;
+  min-width: 20px;
+}
+.gf-review-notify-title {
+  flex: 1;
+  font-size: 12px;
+}
+.gf-review-notify-hint {
+  padding: 8px 14px 12px;
+  font-size: 11px;
+  color: #c5cedc;
+  text-align: center;
+  line-height: 1.5;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  background: rgba(52, 28, 82, 0.6);
+}
+.gf-review-notify-hint kbd {
+  display: inline-block;
+  background: #2d1f45;
+  border: 1px solid #5b4580;
+  border-radius: 3px;
+  padding: 1px 5px;
+  font-family: "Microsoft YaHei", "微软雅黑", sans-serif;
+  color: #c5cedc;
+  font-size: 10px;
+}

@@ -6,6 +6,14 @@
  * 3. 代理 API 请求以绕过 HTTPS 页面上的 Mixed Content 限制
  */
 
+const FETCH_TIMEOUT_MS = 8000;
+
+function fetchWithTimeout(url, timeoutMs = FETCH_TIMEOUT_MS) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  return fetch(url, { signal: controller.signal }).finally(() => clearTimeout(timer));
+}
+
 chrome.commands.onCommand.addListener((command) => {
   if (command === "toggle-guide") {
     console.log("[Background] 捕获快捷键命令 Alt + G，正在激活对应的选项卡...");
@@ -23,82 +31,49 @@ chrome.commands.onCommand.addListener((command) => {
   }
 });
 
+// 代理 REST 请求：统一拼接 URL、超时控制、错误处理
+function proxyRestRequest(method, params, sendResponse) {
+  chrome.storage.local.get(["appguide_apiBaseUrl"], (result) => {
+    const apiBaseUrl = result.appguide_apiBaseUrl || "api.skillcloud.cn";
+    const baseUrl = /^https?:\/\//i.test(apiBaseUrl) ? apiBaseUrl : `http://${apiBaseUrl}`;
+    const qs = Object.entries(params)
+      .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`)
+      .join("&");
+    const fetchUrl = `${baseUrl}/rest?method=${encodeURIComponent(method)}&${qs}`;
+
+    console.log(`[Background] 代理请求 ${method}:`, fetchUrl);
+
+    fetchWithTimeout(fetchUrl)
+      .then(res => res.json())
+      .then(data => sendResponse({ success: true, data }))
+      .catch(err => {
+        console.error(`[Background] ${method} 失败:`, err);
+        sendResponse({ success: false, error: err.name === "AbortError" ? "请求超时" : err.message });
+      });
+  });
+}
+
 // 代理 fetch 请求：从扩展自身 origin 发起，不受页面 Mixed Content 限制
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.action === "fetch-guide") {
-    const cleanPath = message.url;
-    const flowId = message.flowId || "";
-
-    chrome.storage.local.get(["apiBaseUrl"], (result) => {
-      const apiBaseUrl = result.apiBaseUrl || "api.skillcloud.cn";
-      // 自动补全 http:// 协议前缀
-      const baseUrl = /^https?:\/\//i.test(apiBaseUrl) ? apiBaseUrl : `http://${apiBaseUrl}`;
-      // 生产环境统一使用 REST 风格 method 参数
-      let fetchUrl = `${baseUrl}/rest?method=appguide.flows.guide&url=${encodeURIComponent(cleanPath)}`;
-      if (flowId) {
-        // 携带正在进行中的流程id，供服务端优先在该流程内匹配当前页（跨页续接）
-        fetchUrl += `&flowId=${encodeURIComponent(flowId)}`;
-      }
-
-      console.log("[Background] 代理获取指南:", fetchUrl);
-
-      fetch(fetchUrl)
-        .then(res => res.json())
-        .then(data => {
-          sendResponse({ success: true, data });
-        })
-        .catch(err => {
-          console.error("[Background] 获取指南失败:", err);
-          sendResponse({ success: false, error: err.message });
-        });
-    });
-
-    return true; // 保持消息通道开放以进行异步响应
+    const params = { url: message.url };
+    if (message.flowId) params.flowId = message.flowId;
+    proxyRestRequest("appguide.flows.guide", params, sendResponse);
+    return true;
   }
 
   if (message.action === "fetch-flows-by-pattern") {
-    const cleanPath = message.url;
-
-    chrome.storage.local.get(["apiBaseUrl"], (result) => {
-      const apiBaseUrl = result.apiBaseUrl || "api.skillcloud.cn";
-      const baseUrl = /^https?:\/\//i.test(apiBaseUrl) ? apiBaseUrl : `http://${apiBaseUrl}`;
-      const fetchUrl = `${baseUrl}/rest?method=appguide.flows.bypattern&url=${encodeURIComponent(cleanPath)}`;
-
-      console.log("[Background] 代理获取流程模式匹配:", fetchUrl);
-
-      fetch(fetchUrl)
-        .then(res => res.json())
-        .then(data => sendResponse({ success: true, data }))
-        .catch(err => {
-          console.error("[Background] 获取流程模式匹配失败:", err);
-          sendResponse({ success: false, error: err.message });
-        });
-    });
-
+    proxyRestRequest("appguide.flows.bypattern", { url: message.url }, sendResponse);
     return true;
   }
 
   if (message.action === "track-stats") {
-    const { flowId, type } = message;
+    proxyRestRequest("appguide.flows.stats", { id: message.flowId, type: message.type }, sendResponse);
+    return true;
+  }
 
-    chrome.storage.local.get(["apiBaseUrl"], (result) => {
-      const apiBaseUrl = result.apiBaseUrl || "api.skillcloud.cn";
-      const baseUrl = /^https?:\/\//i.test(apiBaseUrl) ? apiBaseUrl : `http://${apiBaseUrl}`;
-      const fetchUrl = `${baseUrl}/api/flows/stats`;
-
-      fetch(fetchUrl, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ id: flowId, type }),
-      })
-        .then(res => res.json())
-        .then(data => sendResponse({ success: true, data }))
-        .catch(err => {
-          console.error("[Background] 更新流程统计失败:", err);
-          sendResponse({ success: false, error: err.message });
-        });
-    });
-
+  if (message.action === "fetch-flow-by-id") {
+    proxyRestRequest("appguide.flows.byid", { id: message.flowId || "" }, sendResponse);
     return true;
   }
 });

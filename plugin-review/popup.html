@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>智导领航流程审核</title>
+  <style>
+    body { width: 280px; padding: 16px; font-family: "Microsoft YaHei", "微软雅黑", sans-serif; }
+    h3 { margin: 0 0 12px 0; font-size: 14px; color: #1e293b; }
+    label { display: block; font-size: 12px; color: #64748b; margin-bottom: 4px; }
+    input { width: 100%; padding: 6px 8px; border: 1px solid #cbd5e1; border-radius: 6px; font-size: 12px; box-sizing: border-box; }
+    button { margin-top: 10px; width: 100%; padding: 8px; background: #2563eb; color: #fff; border: none; border-radius: 6px; font-size: 13px; cursor: pointer; }
+    button:hover { background: #3b82f6; }
+    #status { margin-top: 8px; font-size: 11px; color: #16a34a; display: none; }
+  </style>
+</head>
+<body>
+  <h3>🔍 智导领航系统-流程审核</h3>
+  <label for="apiUrl">API 服务地址</label>
+  <input type="text" id="apiUrl" placeholder="api.skillcloud.cn">
+  <button id="saveBtn">保存配置</button>
+  <div id="status">✅ 配置已保存</div>
+  <script src="popup.js"></script>
+</body>
+</html>

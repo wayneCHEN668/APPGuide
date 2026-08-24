@@ -11,8 +11,9 @@ import CleanCSS from 'clean-css';
 
 const __dirname = fileURLToPath(new URL('.', import.meta.url));
 const rootDir = join(__dirname, '..');
-const srcDir = join(rootDir, 'plugin');
-const outDir = join(rootDir, 'dist', 'plugin');
+const targetDir = process.argv[2] || 'plugin';
+const srcDir = join(rootDir, targetDir);
+const outDir = join(rootDir, 'dist', targetDir);
 
 // ── 跨文件共享的字符串字面量：必须保留原文，否则 background↔content↔popup 通信断裂 ──
 const RESERVED_STRINGS = [

@@ -544,6 +544,155 @@ app.post("/api/flows/stats", async (req, res) => {
   }
 });
 
+// ============================================================
+// POST /api/flows/corrections  — 批量回填人工审核确认的 selector
+//
+// 调用方：审核版 Chrome 插件（plugin-review）
+//   每完成一页审核 → submitPageCorrections() → 发本页 corrections
+//   流程最后一页    → submitCorrections()        → 发最后一批 + 清除 flow state
+//
+// 请求体（JSON）：
+//   {
+//     flowId: string,       // 被审核的流程 id（如 "flow-001"）
+//     corrections: [{
+//       pageIndex: number,  // pages 数组中的页索引（0-based）
+//       stepIndex: number,  // steps 数组中的步骤索引（0-based）
+//       selector: string    // 审核确认的稳定 CSS selector
+//     }]
+//   }
+//
+// 处理逻辑：
+//   1. 按 flowId 查出完整流程记录
+//   2. 按每一条 correction 的 {pageIndex, stepIndex} 定位到具体步骤
+//   3. 覆盖该步骤的 selector 字段
+//   4. 序列化整个 steps JSON 回写到库/文件
+//
+// 注意：
+//   - 只更新 corrections 中明确列出的步骤，未列出的步骤不受影响
+//   - 若某次审核无法生成稳定 selector，客户端不会把该步骤加入 corrections，
+//     因此该步骤的 selector 不会被写入
+//   - supports 两种运行模式：SKIP_DB=true 时操作本地 JSON 文件，否则操作 MySQL
+// ============================================================
+
+app.post("/api/flows/corrections", async (req, res) => {
+  try {
+    // ---- 1. 解析并校验请求体 ----
+    const { flowId, corrections } = req.body;
+
+    // flowId 必须存在；corrections 必须是非空数组
+    if (!flowId || !Array.isArray(corrections) || corrections.length === 0) {
+      res.status(400).json({ success: false, reason: "bad_request", message: "缺少 flowId 或 corrections 参数。" });
+      return;
+    }
+
+    // ---- 分支A：无数据库模式（SKIP_DB=true / pool 未初始化） ----
+    // 直接读取、修改、写回本地 JSON 文件（api/flows/{flowId}.json）
+    if (SKIP_DB || !pool) {
+
+      // 定位 JSON 文件路径
+      const flowsDir = path.resolve("api/flows");
+      const filePath = path.join(flowsDir, `${flowId}.json`);
+
+      // 文件不存在 → 404
+      if (!fs.existsSync(filePath)) {
+        res.status(404).json({ success: false, reason: "not_found", message: `未找到 flowId=${flowId} 的 JSON 文件。` });
+        return;
+      }
+
+      // 读取并解析 JSON 文件
+      const flowJson = JSON.parse(fs.readFileSync(filePath, "utf-8"));
+      const pages = flowJson.pages || [];  // pages 是顶层数组，每个元素是一页
+
+      // 逐条处理 corrections：按 pageIndex → stepIndex 定位并写入
+      for (const corr of corrections) {
+        const { pageIndex, stepIndex, selector } = corr;
+
+        // 校验 pageIndex 范围
+        if (pageIndex >= 0 && pageIndex < pages.length) {
+          const steps = pages[pageIndex].steps || [];  // 该页的 steps 数组
+
+          // 校验 stepIndex 范围
+          if (stepIndex >= 0 && stepIndex < steps.length) {
+            // ★ 核心：覆盖 selector
+            steps[stepIndex].selector = selector;
+            console.log(`[guide_server] 本地文件修正: flowId=${flowId}, page=${pageIndex}, step=${stepIndex}, selector="${selector}"`);
+          }
+        }
+      }
+
+      // 写回 JSON 文件（2 空格缩进，保持可读性）
+      flowJson.pages = pages;
+      fs.writeFileSync(filePath, JSON.stringify(flowJson, null, 2), "utf-8");
+
+      res.json({ success: true, message: `已更新 ${corrections.length} 个步骤的定位器。` });
+      return;
+    }
+
+    // ---- 分支B：数据库模式 ----
+    // 查出记录 → 解析 steps 列的 JSON → 修改 → 序列化 → UPDATE 回去
+
+    // 只查 id 和 steps 两列，不需要整行
+    const [rows] = await pool.query("SELECT id, steps FROM appguide WHERE id = ?", [flowId]);
+
+    // 记录不存在 → 404
+    if ((rows as any[]).length === 0) {
+      res.status(404).json({ success: false, reason: "not_found", message: `未找到 flowId=${flowId} 的记录。` });
+      return;
+    }
+
+    // steps 列存的是 JSON，可能为字符串（MySQL TEXT/JSON 类型）或已解析对象
+    const row = (rows as any[])[0];
+    const stepsData = typeof row.steps === "string" ? JSON.parse(row.steps) : row.steps;
+    const pages = stepsData.pages || [];  // pages 是 JSON 内的顶层数组
+
+    // 逐条处理 corrections（逻辑与文件模式完全相同）
+    for (const corr of corrections) {
+      const { pageIndex, stepIndex, selector } = corr;
+
+      if (pageIndex >= 0 && pageIndex < pages.length) {
+        const steps = pages[pageIndex].steps || [];
+
+        if (stepIndex >= 0 && stepIndex < steps.length) {
+          // ★ 核心：写入 selector
+          steps[stepIndex].selector = selector;
+          console.log(`[guide_server] DB修正: flowId=${flowId}, page=${pageIndex}, step=${stepIndex}, selector="${selector}"`);
+        }
+      }
+    }
+
+    // 序列化修改后的 steps JSON，UPDATE 回数据库
+    const updatedStepsJson = JSON.stringify(stepsData);
+    await pool.query("UPDATE appguide SET steps = ? WHERE id = ?", [updatedStepsJson, flowId]);
+
+    res.json({ success: true, message: `已更新 ${corrections.length} 个步骤的定位器。` });
+
+  } catch (err) {
+    // 未预期的运行时错误（DB 断连、磁盘满等）
+    console.error("[guide_server] POST /api/flows/corrections 出错:", (err as Error).message);
+    res.status(500).json({ success: false, reason: "server_error", message: "服务端更新定位器时出错。" });
+  }
+});
+
+// ============================================================
+// POST /rest?method=appguide.flows.corrections  — 兼容生产环境统一入口
+// ============================================================
+
+app.post("/rest", async (req, res) => {
+  const method = typeof req.query.method === "string" ? req.query.method : "";
+
+  if (method === "appguide.flows.corrections") {
+    req.url = "/api/flows/corrections";
+    return app.handle(req, res);
+  }
+
+  if (method === "appguide.flows.stats") {
+    req.url = "/api/flows/stats";
+    return app.handle(req, res);
+  }
+
+  res.status(400).json({ success: false, reason: "bad_request", message: `未知的 method: ${method}` });
+});
+
 app.listen(PORT, () => {
   console.log(`Guide server running on http://localhost:${PORT}`);
 });

@@ -33,6 +33,12 @@
   // 作用域仅限"当前这一个文档"，不跨iframe/跨页面共享。
   let usedElements = new WeakSet();
 
+  // 每个步骤上一轮匹配到的元素（步骤对象 → 元素）。同一步骤重渲染时先把它从 usedElements 里放回去，
+  // 免得自己占的坑把自己挡住（见 renderGuideUI）。
+  // 用WeakMap而不是往step上挂属性：step对象可能与 flowMeta.cachedFlow 里的步骤是同一个引用，
+  // 而 cachedFlow 会被 persistFlowState 写进 chrome.storage——DOM元素不可结构化克隆，挂上去会写失败。
+  const stepMatchedElements = new WeakMap();
+
   // 顶层文档 vs iframe worker 身份判定。
   // 顶层：持有引导状态、渲染气泡、读写storage、调用API——唯一的"指挥官"。
   // iframe：只被动响应顶层广播的"帮我找这个控件"指令，自己画高亮，不渲染气泡、不碰API/storage。
@@ -45,7 +51,7 @@
 
   // 跨页流程运行时状态：存在 chrome.storage.local，仅记录"进行到哪一步了"，
   // 不存具体steps内容（那些每次都从API重新拉取，保证内容永远最新）
-  const FLOW_STATE_KEY = "guideFlowState";
+  const FLOW_STATE_KEY = "appguide_flowState";
   const FLOW_TTL_MS = 2 * 60 * 60 * 1000; // 2小时不活跃视为放弃
 
   // 注：API 地址由 popup 配置并存储在 chrome.storage，实际 fetch 由 background worker 代理执行
@@ -58,12 +64,12 @@
     Object.defineProperty(window, "__appguideDebug", {
       configurable: true,
       get() {
-        try { return localStorage.getItem("__appguideDebug") === "1"; } catch (e) { return false; }
+        try { return localStorage.getItem("appguide_debug") === "1"; } catch (e) { return false; }
       },
       set(val) {
         try {
-          if (val) localStorage.setItem("__appguideDebug", "1");
-          else localStorage.removeItem("__appguideDebug");
+          if (val) localStorage.setItem("appguide_debug", "1");
+          else localStorage.removeItem("appguide_debug");
         } catch (e) {
           // localStorage不可用（极少数受限环境），静默忽略，退回当次页面临时生效
         }
@@ -75,8 +81,8 @@
 
   console.log(
     IS_TOP_FRAME
-      ? "[BusinessGuide] 插件内容脚本已成功注入目标系统（顶层）。支持高级本地语义模糊匹配 + 跨页流程续接 + iframe内控件探测。"
-      : "[BusinessGuide] 插件内容脚本已注入iframe子文档，作为顶层的控件探测worker运行。"
+      ? "[BusinessGuide] 引导插件内容脚本已成功注入目标系统（顶层）。引导模式已就绪，快捷键：Alt+G"
+      : "[BusinessGuide] 引导插件内容脚本已注入iframe子文档，作为顶层的控件探测worker运行。"
   );
 
   if (IS_TOP_FRAME) {
@@ -109,6 +115,31 @@
       const state = await getFlowStateIfValid();
       if (!state) return;
 
+      // 缓存优先：以 state.pageIndex 为目标页，只比对这一页的 URL，避免跳到流程中其他页
+      if (state.cachedFlow) {
+        var targetIdx = (typeof state.pageIndex === "number") ? state.pageIndex : 0;
+        if (targetIdx >= 0 && targetIdx < state.cachedFlow.pages.length) {
+          var expectedPage = state.cachedFlow.pages[targetIdx];
+          if (urlsMatchClient(expectedPage.url, window.location.href)) {
+            var resolved = resolvePageByIndex(state.cachedFlow, targetIdx);
+            console.log("[BusinessGuide] 从本地缓存续接跨页流程：", state.flowId,
+              "（第" + (targetIdx + 1) + "/" + state.cachedFlow.pages.length + "页）");
+            startGuideFromResolved(resolved, state);
+            return;
+          }
+          // URL 不匹配 → 直接按继续引导处理
+          console.log("[BusinessGuide] 当前 URL 与流程预期页面不匹配，直接继续引导");
+          var resolved = resolvePageByIndex(state.cachedFlow, targetIdx);
+          if (resolved) {
+            startGuideFromResolved(resolved, state);
+          } else {
+            showToast("❌ 无法加载预期页面数据");
+          }
+          return;
+        }
+        // pageIndex 异常，回退 API
+      }
+
       try {
         const data = await fetchGuideFromApi(getCleanPath(), state.flowId);
         if (data && data.success && data.mode === "resume") {
@@ -135,9 +166,12 @@
           console.log("[BusinessGuide] 检测到", flows.length, "个可用引导流程");
           renderFlowNotification(flows);
         }
-        // 结果为 0 时不渲染任何东西（旧通知已在上面清掉）
+        else {
+          // 结果为 0 时不渲染任何东西（旧通知已在上面清掉）
+          console.log("[BusinessGuide] 检测到", flows.length, "个可用引导流程 " + getCleanPath());
+        }
       } catch (e) {
-        console.warn("[BusinessGuide] refreshFlowNotification 失败:", e);
+        console.warn("[BusinessGuide] refreshFlowNotification 失败:", e);        
       }
     }
 
@@ -177,6 +211,11 @@
 
       try {
         const activeSelector = step.resolvedSelector || step.selector;
+        // 步骤可能压根没配selector（服务端下发的步骤只有title/description），
+        // 语义匹配没落地时 resolvedSelector 也会是 null/空串。
+        // 空串传给 querySelector 会直接抛 SyntaxError（每次焦点事件都刷一条），
+        // undefined 则会被当成 "undefined" 标签名白查一次——两种都没有意义，直接跳过。
+        if (!activeSelector) return;
         const target = document.querySelector(activeSelector);
         if (target && (target === e.target || target.contains(e.target))) {
           console.log("[BusinessGuide] 操作员精准定位到当前目标：", activeSelector);
@@ -196,6 +235,11 @@
     // 被动等待顶层广播的指令：找一个目标元素 / 清除当前高亮。
     // 不主动发起任何请求，不持有引导状态。
     console.log("[BusinessGuide][iframe] worker已就绪，等待顶层指令。当前文档URL:", window.location.href);
+
+    // 同一个步骤会被顶层探测多次（超时重试 + S0→S3逐级联配各来一轮），而每次收到的 step 都是
+    // 顶层新拼的纯数据对象，没法像顶层那样把"上一轮占用的元素"挂在 step 上。这里按步骤标题记住，
+    // 下一次针对同一步骤的探测先释放它，否则第二轮探测会因为"已被占用"而被迫换成另一个元素。
+    const iframeStepMatched = new Map();
 
     window.addEventListener("message", (event) => {
       const data = event.data;
@@ -222,9 +266,16 @@
 
       if (data.type === "find") {
         cleanupUI(); // 开始新一轮查找前，先清掉自己可能还留着的旧高亮
-        const local = resolveLocalTarget(data.step);
+        const stepKey = (data.step && data.step.title) || "";
+        const prevMatched = iframeStepMatched.get(stepKey);
+        if (prevMatched) {
+          usedElements.delete(prevMatched);
+          iframeStepMatched.delete(stepKey);
+        }
+        const local = resolveLocalTarget(data.step, false, data.step.strategyLevel);
         if (local) {
           usedElements.add(local.element);
+          iframeStepMatched.set(stepKey, local.element);
           createHighlightForElement(local.element, data.step.highlightStyle);
           console.log(`[BusinessGuide][iframe] 本文档内找到匹配元素，已画高亮，回复顶层 found:true`);
         } else {
@@ -355,6 +406,23 @@
             }
           }
         }
+
+        // 排除"被折叠容器裁掉"的元素：手风琴菜单收起时的典型实现不是 display:none，
+        // 而是给容器 max-height:0 / height:0 + overflow:hidden——被收起的子项自己依然有
+        // 完整的布局尺寸（rect 照样是 208×40），上面那几道检查一个都拦不住，
+        // 于是"收起的子菜单项"会照常进候选池，把可见的父级菜单顶掉。
+        // 只对"尺寸为0的祖先"才去算样式，正常情况下不会有额外开销。
+        let clipAncestor = el.parentElement;
+        for (let lv = 0; lv < 8 && clipAncestor && clipAncestor !== document.body; lv++) {
+          const ar = clipAncestor.getBoundingClientRect();
+          if (ar.height === 0 || ar.width === 0) {
+            const acs = getComputedStyle(clipAncestor);
+            if (acs.overflow !== "visible" || acs.overflowX !== "visible" || acs.overflowY !== "visible") {
+              return;
+            }
+          }
+          clipAncestor = clipAncestor.parentElement;
+        }
       } catch (e) {
         // 计算样式失败（极少数情况，比如元素已从DOM分离），不因此排除
       }
@@ -366,12 +434,17 @@
       const ariaLabel = el.getAttribute("aria-label") || "";
       const textContent = el.textContent ? el.textContent.trim() : "";
 
-      // 寻找对应的 Label 文字
+      // 寻找对应的 Label 文字。
+      // labelFromSelf 记录这个label是"元素自己就带着的"（自身文字 / label[for] 绑定 / aria-label），
+      // 还是"从旁边推导借来的"（sibling walk / 父容器文本）。下面过滤空壳图标元素时要用：
+      // 只有"借来的"才该被过滤，自带标签的图标按钮必须留在候选池里。
       let labelText = "";
+      let labelFromSelf = false;
       if (id) {
         const labelEl = document.querySelector(`label[for="${id}"]`);
         if (labelEl) {
           labelText = labelEl.textContent || "";
+          labelFromSelf = true; // <label for> 是显式绑定到这个控件的，等同于它自己的标签
         }
       }
 
@@ -380,6 +453,26 @@
         // 只有自身无文本（如图标按钮）时才走后续的向上查找逻辑
         if ((tagName === "button" || tagName === "a" || el.getAttribute("role") === "button") && textContent) {
           labelText = textContent;
+          labelFromSelf = true;
+        }
+      }
+
+      if (!labelText) {
+        // 元素自己就带着文字时（比如 <span class="menu-title">企业数据管理</span>），
+        // 这段文字才是它真正的语义标签，必须优先于下面的 sibling-walk。
+        // 否则同一个分组里的每一项都会被上方那行分组标题（"企业管理"之类）覆盖成同一个label，
+        // 彼此再也区分不开，匹配只能靠并列取舍去猜，必然选错。
+        // 只认"直接文本节点"：容器套着一堆后代文字的情况仍然走下面的原有逻辑。
+        let ownText = "";
+        for (let ci = 0; ci < el.childNodes.length; ci++) {
+          const child = el.childNodes[ci];
+          if (child.nodeType === Node.TEXT_NODE && child.textContent.trim()) {
+            ownText += child.textContent.trim();
+          }
+        }
+        if (ownText && ownText.length < 30) {
+          labelText = ownText;
+          labelFromSelf = true;
         }
       }
 
@@ -402,9 +495,11 @@
       if (!labelText) {
         if (tagName === "button" || tagName === "a" || el.getAttribute("role") === "button") {
           labelText = textContent;
+          labelFromSelf = !!textContent;
         } else if ((tagName === "div" || tagName === "span" || tagName === "p" || /^h[3-6]$/.test(tagName)) && textContent && textContent.length < 30) {
           // 类按钮容器（如"创建任务"/"创建一个语料库"）及标题元素，优先用自身文本
           labelText = textContent;
+          labelFromSelf = true;
         } else {
           // 向上找父节点容器中的关联文本
           const parent = el.parentElement;
@@ -422,10 +517,18 @@
       // aria-label 不是可见文本节点，只能通过 getAttribute 获取。
       // 这里如果 labelText 还为空就用 ariaLabel；如果不为空但不包含 ariaLabel
       // （说明 sibling walk 拿到的只是附近无关文字），就把 ariaLabel 前置优先。
-      if (!labelText && ariaLabel) {
+      if (ariaLabel && !textContent) {
+        // 纯图标控件（自身一个字都没有）：aria-label 就是它唯一且正确的语义标签，
+        // 必须整个替换掉上面 sibling/parent walk 借来的邻居文字——那些文字属于别的控件，
+        // 拼进来会让这个按钮的label塞进半个侧边栏的内容，从而在别人的匹配里冒名顶替。
         labelText = ariaLabel;
+        labelFromSelf = true;
+      } else if (!labelText && ariaLabel) {
+        labelText = ariaLabel;
+        labelFromSelf = true; // aria-label 是写在这个元素自己身上的，属于自带标签
       } else if (labelText && ariaLabel && !labelText.includes(ariaLabel)) {
         labelText = ariaLabel + " " + labelText;
+        labelFromSelf = true;
       }
 
       // 自动构建可用的 CSS 选择器
@@ -445,6 +548,28 @@
 
       // 只要选择器存在且不是高亮气泡本身的元素，就记录下来
       if (selector && !className.includes("guide-extension")) {
+        // 过滤空壳图标元素：自身无直接文本节点，仅包含svg/img等图标子节点，
+        // 且label是从旁边"借"来的（sibling walk / 父容器文本），比如 "<span class="icon"><svg>…</svg></span>"
+        // 借用了隔壁的字段名——这种要过滤掉，高亮应落在文字元素本身而非图标壳子上。
+        //
+        // 但"自带标签"的元素不在此列（labelFromSelf）：纯图标按钮（侧边栏收起、关闭X、汉堡菜单）
+        // 的 aria-label 就写在它自己身上，是它唯一也是正确的语义标签。
+        // 之前这里只看元素长相不看label来源，把上面那段 aria-label 兜底逻辑的成果又一把丢掉，
+        // 导致这类控件永远进不了候选池、永远匹配不上——两段代码互相打架。
+        if (labelText && !labelFromSelf) {
+          var hasOwnDirectText = false;
+          for (var ci = 0; ci < el.childNodes.length; ci++) {
+            var child = el.childNodes[ci];
+            if (child.nodeType === Node.TEXT_NODE && child.textContent.trim()) {
+              hasOwnDirectText = true;
+              break;
+            }
+          }
+          if (!hasOwnDirectText && el.querySelector && el.querySelector("svg, img, i[class*='icon'], span[class*='icon']")) {
+            return; // 空图标壳子，不纳入候选池
+          }
+        }
+
         list.push({
           element: el,
           selector: selector,
@@ -459,7 +584,7 @@
 
     // 第1层：原有的标签+关键词选择器，最常见、最便宜，优先扫
     document.querySelectorAll(
-      "input, select, textarea, button, a, [role='button'], div[class*='submit'], div[class*='btn'], div[class*='Btn'], [class*='submit-btn'], div[class*='switch'], div[class*='icon-button']"
+      "input, select, textarea, button, a, [role='button'], div[class*='submit'], div[class*='btn'], div[class*='Btn'], [class*='submit-btn'], div[class*='switch'], div[class*='icon-button'], [class*='cursor-pointer']"
     ).forEach(pushCandidate);
 
     // 第2层：有 tabindex 或标准 ARIA 交互 role 的元素——
@@ -532,77 +657,67 @@
     return unused || pool[0];
   }
 
-  // 对特定步骤指南执行本地语义匹配，返回最匹配的页面 DOM 元素
-  function findBestSemanticMatch(step) {
-    const scanned = scanDOM();
-    if (scanned.length === 0) return null;
+  // ---- 语义匹配预处理工具 ----
 
-    // 调试开关：在Chrome控制台执行 window.__appguideDebug = true 即可对"接下来匹配的每一步"
-    // 打印详细的候选打分过程；执行 window.__appguideDebug = false 关闭。
-    // （之前这里是写死 step.title === "上传PPT文件" 只能调试固定的某一步，现在改成运行时开关，
-    // 不用改代码就能对任意一步开启，包括iframe worker里也认这个开关）
-    // window.__appguideDebug 现在是个读写localStorage的属性（见文件顶部defineProperty），
-    // 这里直接读取即可，不用再单独处理持久化逻辑。
-    const isDebug = !!window.__appguideDebug;
-    if (isDebug) {
-      console.log("[DEBUG] === 匹配步骤:", step.title, "===", IS_TOP_FRAME ? "(顶层文档)" : "(iframe worker: " + window.location.href + ")");
-      console.log("[DEBUG] 扫描到", scanned.length, "个控件");
-      console.log("[DEBUG] 全部控件:", scanned.map(it => ({
-        tag: it.type, selector: it.selector, label: it.label.substring(0,40)
-      })));
-    }
+  // 清洗文本中的非文字符号和占位填充词
+  function stripSymbols(str) {
+    return str.replace(/[^\w一-鿿\s]/g, '').replace(/(?:一个|一下|一份|一次)/g, '').replace(/\s+/g, '').trim();
+  }
 
-    // 策略0: 完整标题匹配 (最高优先级)
-    // clickText 优先：如果步骤配置了按钮上的确切文本，用 clickText 比对；否则回退到 title
-    // 比较前去掉双方的非文字符号（如 *、#、- 等），避免因格式差异导致相等匹配失败
-    const rawText = step.clickText || step.title;
-    // 取第一个空格前的内容作为精确匹配文本：标题如"展开导航 侧边栏"只匹配"展开导航"，
-    // 避免标题里附带的位置/分类说明（空格后面的部分）干扰精确匹配。
-    const spaceIdx = rawText.indexOf(" ");
-    const matchText = spaceIdx > 0 ? rawText.substring(0, spaceIdx) : rawText;
-    const stripSymbols = (str) => str.replace(/[^\w\u4e00-\u9fff\s]/g, '').replace(/(?:一个|一下|一份|一次)/g, '').replace(/\s+/g, ' ').trim();    
-    const normalizedTitle = stripSymbols(matchText);
+  // 从步骤中提取用于匹配的核心文本
+  function getMatchText(step) {
+    var rawText = step.clickText || step.title;
+    var spaceIdx = rawText.indexOf(" ");
+    return spaceIdx > 0 ? rawText.substring(0, spaceIdx) : rawText;
+  }
+
+  // ---- 独立策略函数 (S0-S3) ----
+  // 每个接收 (step, scanned)，返回 {element, selector, label, score} 或 null
+
+  // S0: 完整标题精确匹配 (最高优先级)
+  function tryS0Match(step, scanned) {
+    var isDebug = !!window.__appguideDebug;
+    var matchText = getMatchText(step);
+    var normalizedTitle = stripSymbols(matchText);
     if (isDebug) console.log("[DEBUG] S0 完整标题匹配: matchText =", JSON.stringify(matchText), "(来源:", step.clickText ? "clickText" : "title", ")", "normalized =", JSON.stringify(normalizedTitle));
-    // 标题清洗后如果是空字符串（比如标题本身全是符号，或者整个被填充词表吃掉），
-    // 不能再走"完全匹配"——任何label同样被清空成空字符串的候选（纯图标、无文字元素）
-    // 都会被误判成"完全匹配"，这种情况直接跳过S0，往下走更谨慎的模糊匹配策略。
     if (normalizedTitle.length === 0) {
-      if (isDebug) console.log("[DEBUG] S0 标题清洗后为空字符串，跳过完全匹配防止误配，直接进入S1");
-    } else {
-      const s0Matches = [];
-      for (const item of scanned) {
-        const normalizedLabel = stripSymbols(item.label);
-        if (normalizedLabel === normalizedTitle) {
-          s0Matches.push(item);
-        }
-      }
-      if (s0Matches.length > 0) {
-        const chosen = pickPreferUnused(s0Matches);
-        if (isDebug) console.log("[DEBUG] S0 命中! label:", chosen.label.substring(0, 30), `(候选数:${s0Matches.length}, 已去重复用)`);
-        return {
-          element: chosen.element,
-          selector: chosen.selector,
-          label: chosen.label,
-          score: 0.95
-        };
-      }
-      if (isDebug) console.log("[DEBUG] S0 未命中，进入S1");
+      if (isDebug) console.log("[DEBUG] S0 标题清洗后为空字符串，跳过");
+      return null;
     }
+    var s0Matches = [];
+    for (var i = 0; i < scanned.length; i++) {
+      var item = scanned[i];
+      var normalizedLabel = stripSymbols(item.label);
+      if (normalizedLabel === normalizedTitle) {
+        s0Matches.push(item);
+      }
+    }
+    if (s0Matches.length > 0) {
+      var chosen = pickPreferUnused(s0Matches);
+      if (isDebug) console.log("[DEBUG] S0 命中! label:", chosen.label.substring(0, 30), "(候选数:" + s0Matches.length + ")");
+      return { element: chosen.element, selector: chosen.selector, label: chosen.label, score: 0.95 };
+    }
+    if (isDebug) console.log("[DEBUG] S0 未命中");
+    return null;
+  }
 
-    // 策略1: 标题关键词子串匹配 (高置信度)
-    const titleChars = matchText.replace(/^(设置|选择|找到|点击|上传|提交|填写|添加|输入|创建)/, '').trim();
+  // S1: 标题关键词子串匹配
+  function tryS1Match(step, scanned) {
+    var isDebug = !!window.__appguideDebug;
+    var matchText = getMatchText(step);
+    var titleChars = matchText.replace(/^(设置|选择|找到|点击|上传|提交|填写|添加|输入|创建)/, '').trim();
     if (isDebug) console.log("[DEBUG] S1 关键词:", JSON.stringify(titleChars));
-    const s1Matches = [];
-    for (const item of scanned) {
-      const labelInTitle = titleChars.length >= 2 && item.label.includes(titleChars);
-      //const labelInDesc = item.label.length >= 2 && step.description.includes(item.label);
-      if (labelInTitle ) {
+    var s1Matches = [];
+    for (var i = 0; i < scanned.length; i++) {
+      var item = scanned[i];
+      var labelInTitle = titleChars.length >= 2 && item.label.includes(titleChars);
+      if (labelInTitle) {
         s1Matches.push(item);
       }
     }
     if (s1Matches.length > 0) {
-      const chosen = pickPreferUnused(s1Matches);
-      if (isDebug) console.log("[DEBUG] S1 命中! label:", chosen.label.substring(0,30), `(候选数:${s1Matches.length}, 已去重复用)`);
+      var chosen = pickPreferUnused(s1Matches);
+      if (isDebug) console.log("[DEBUG] S1 命中! label:", chosen.label.substring(0,30), "(候选数:" + s1Matches.length + ")");
       return {
         element: chosen.element,
         selector: chosen.selector,
@@ -610,32 +725,47 @@
         score: 0.90 + (Math.min(chosen.label.length, 6) / Math.max(chosen.label.length, 6)) * 0.10
       };
     }
-    if (isDebug) console.log("[DEBUG] S1 未命中，进入S2");
+    if (isDebug) console.log("[DEBUG] S1 未命中");
+    return null;
+  }
 
-    // 策略2: 标题全字符双向重叠检测
-    // 候选文本长度 > 8 的通常不是单个可交互控件（如大段说明文字），直接跳过
+  // S2: 标题全字符双向重叠检测
+  function tryS2Match(step, scanned) {
+    var isDebug = !!window.__appguideDebug;
+    var matchText = getMatchText(step);
     if (isDebug) console.log("[DEBUG] S2 开始扫描...");
-    let s2Top = [];
-    const s2Matches = [];
-    for (const item of scanned) {
-      const labelLen = item.label.replace(/\s/g, '').length;
+    var s2Top = [];
+    var s2Matches = [];
+    for (var i = 0; i < scanned.length; i++) {
+      var item = scanned[i];
+      var labelLen = item.label.replace(/\s/g, '').length;
       if (labelLen > 8) continue;
-      const titleSet = new Set(matchText.replace(/\s/g, '').split(''));
-      const labelSet = new Set(item.label.replace(/\s/g, '').split(''));
-      const overlap = [...titleSet].filter(c => labelSet.has(c)).length;
-      const titleOverlap = overlap / titleSet.size;
-      const labelOverlap = labelSet.size > 0 ? overlap / labelSet.size : 0;
-      const bestOverlap = Math.max(titleOverlap, labelOverlap);
+      var titleSet = new Set(matchText.replace(/\s/g, '').split(''));
+      var labelSet = new Set(item.label.replace(/\s/g, '').split(''));
+      var overlap = 0;
+      titleSet.forEach(function(c) { if (labelSet.has(c)) overlap++; });
+      var titleOverlap = overlap / titleSet.size;
+      var labelOverlap = labelSet.size > 0 ? overlap / labelSet.size : 0;
+      var bestOverlap = Math.max(titleOverlap, labelOverlap);
       if (isDebug && bestOverlap > 0.3) {
-        s2Top.push({label: item.label.substring(0,30), selector: item.selector, overlap, titleOverlap: titleOverlap.toFixed(2), labelOverlap: labelOverlap.toFixed(2), best: bestOverlap.toFixed(2)});
+        s2Top.push({label: item.label.substring(0,30), selector: item.selector, overlap: overlap, titleOverlap: titleOverlap.toFixed(2), labelOverlap: labelOverlap.toFixed(2), best: bestOverlap.toFixed(2)});
       }
       if (bestOverlap >= 0.5 && titleSet.size >= 2 && overlap >= 2) {
-        s2Matches.push({ ...item, bestOverlap });
+        s2Matches.push({ element: item.element, selector: item.selector, label: item.label, bestOverlap: bestOverlap });
       }
     }
     if (s2Matches.length > 0) {
-      const chosen = pickPreferUnused(s2Matches);
-      if (isDebug) console.log("[DEBUG] S2 命中! label:", chosen.label.substring(0,30), "bestOverlap:", chosen.bestOverlap.toFixed(2), `(候选数:${s2Matches.length}, 已去重复用)`);
+      // 只在"重叠度最高的那一档"里做取舍。pickPreferUnused 只看包含关系和有没有被用过、
+      // 不看分数，所以不能把所有过线(>=0.5)的候选一股脑丢给它——否则一个重叠度更低、
+      // 但恰好在候选池里排得更靠前的元素（扫描分层决定了<a>永远排在<span>前面，
+      // 跟它在页面上的先后没关系）就会顶掉真正最像的那个。
+      var maxOverlap = 0;
+      for (var m = 0; m < s2Matches.length; m++) {
+        if (s2Matches[m].bestOverlap > maxOverlap) maxOverlap = s2Matches[m].bestOverlap;
+      }
+      var s2Best = s2Matches.filter(function (it) { return it.bestOverlap === maxOverlap; });
+      var chosen = pickPreferUnused(s2Best);
+      if (isDebug) console.log("[DEBUG] S2 命中! label:", chosen.label.substring(0,30), "bestOverlap:", chosen.bestOverlap.toFixed(2), "(候选数:" + s2Matches.length + ")");
       return {
         element: chosen.element,
         selector: chosen.selector,
@@ -643,21 +773,26 @@
         score: 0.70 + chosen.bestOverlap * 0.30
       };
     }
-    if (isDebug) console.log("[DEBUG] S2 未命中 (bestOverlap>=0.5)。高重叠候选:", s2Top.sort((a,b) => parseFloat(b.best)-parseFloat(a.best)).slice(0,5));
+    if (isDebug) console.log("[DEBUG] S2 未命中 (bestOverlap>=0.5)。高重叠候选:", s2Top.sort(function(a,b) { return parseFloat(b.best)-parseFloat(a.best); }).slice(0,5));
+    return null;
+  }
 
-    // 策略3: 加权 TF 余弦相似度 (标题3份 + 描述1份)
-    const query = matchText + " " + matchText + " " + matchText + " " + step.description;
-    let highestScore = 0;
-    let secondBestScore = 0; // 次高分(排除并列最高分的那批)，用于判断"最高分是不是明显甩开了第二名"
-    let bestCandidates = []; // 记录并列最高分的所有候选（重复label场景下，分数会完全相等）
-    let s3Top = [];
+  // S3: 加权 TF 余弦相似度 (标题3份 + 描述1份)
+  function tryS3Match(step, scanned) {
+    var isDebug = !!window.__appguideDebug;
+    var matchText = getMatchText(step);
+    var query = matchText + " " + matchText + " " + matchText + " " + step.description;
+    var highestScore = 0;
+    var secondBestScore = 0;
+    var bestCandidates = [];
+    var s3Top = [];
 
-    scanned.forEach(item => {
-      const score = computeSimilarity(
+    for (var i = 0; i < scanned.length; i++) {
+      var item = scanned[i];
+      var score = computeSimilarity(
         query,
         item.label + " " + item.label + " " + item.placeholder + " " + item.ariaLabel
       );
-
       if (score > highestScore) {
         secondBestScore = highestScore;
         highestScore = score;
@@ -670,11 +805,11 @@
       if (isDebug && score > 0.1) {
         s3Top.push({label: item.label.substring(0,30), selector: item.selector, score: score.toFixed(4)});
       }
-    });
+    }
 
-    let bestMatch = null;
+    var bestMatch = null;
     if (bestCandidates.length > 0) {
-      const chosen = pickPreferUnused(bestCandidates);
+      var chosen = pickPreferUnused(bestCandidates);
       bestMatch = {
         element: chosen.element,
         selector: chosen.selector,
@@ -684,22 +819,62 @@
     }
 
     if (isDebug) {
-      console.log("[DEBUG] S3 结果: score=", bestMatch ? bestMatch.score.toFixed(4) : "N/A", "次高分=", secondBestScore.toFixed(4), "label:", bestMatch ? bestMatch.label.substring(0,30) : "N/A", "selector:", bestMatch ? bestMatch.selector : "N/A", `(候选数:${bestCandidates.length})`);
-      if (s3Top.length > 1) console.log("[DEBUG] S3 Top5:", s3Top.sort((a,b) => parseFloat(b.score)-parseFloat(a.score)).slice(0,5));
+      console.log("[DEBUG] S3 结果: score=", bestMatch ? bestMatch.score.toFixed(4) : "N/A", "次高分=", secondBestScore.toFixed(4), "label:", bestMatch ? bestMatch.label.substring(0,30) : "N/A", "selector:", bestMatch ? bestMatch.selector : "N/A", "(候选数:" + bestCandidates.length + ")");
+      if (s3Top.length > 1) console.log("[DEBUG] S3 Top5:", s3Top.sort(function(a,b) { return parseFloat(b.score)-parseFloat(a.score); }).slice(0,5));
     }
 
-    // margin判定：最高分要明显甩开次高分（差距≥0.08），或者压根没有次高分（说明只有唯一候选，没有歧义）。
-    // 卡在阈值线附近、又跟第二名分数很接近的情况，本质上接近瞎猜，不如判定"不可靠"退回未找到，
-    // 而不是硬选一个可能错的目标。
-    const S3_MARGIN = 0.08;
-    const hasMargin = secondBestScore === 0 || (highestScore - secondBestScore) >= S3_MARGIN;
+    var S3_MARGIN = 0.08;
+    var hasMargin = secondBestScore === 0 || (highestScore - secondBestScore) >= S3_MARGIN;
     if (bestMatch && bestMatch.score >= 0.30) {
       if (!hasMargin) {
-        if (isDebug) console.log(`[DEBUG] S3 最高分与次高分差距不足${S3_MARGIN}（${(highestScore - secondBestScore).toFixed(4)}），判定为不可靠匹配，视为未找到`);
+        if (isDebug) console.log("[DEBUG] S3 最高分与次高分差距不足" + S3_MARGIN + "（" + (highestScore - secondBestScore).toFixed(4) + "），判定为不可靠匹配，视为未找到");
         return null;
       }
       return bestMatch;
     }
+    return null;
+  }
+
+  // 对特定步骤指南执行本地语义匹配，返回最匹配的页面 DOM 元素
+  // strategyLevel: 0|1|2|3 只跑指定策略；不传或 -1 跑全部 S0→S3
+  function findBestSemanticMatch(step, strategyLevel) {
+    const scanned = scanDOM();
+    if (scanned.length === 0) return null;
+
+    const isDebug = !!window.__appguideDebug;
+    if (isDebug && (typeof strategyLevel !== "number" || strategyLevel < 0)) {
+      console.log("[DEBUG] === 匹配步骤:", step.title, "===", IS_TOP_FRAME ? "(顶层文档)" : "(iframe worker: " + window.location.href + ")");
+      console.log("[DEBUG] 扫描到", scanned.length, "个控件");
+      console.log("[DEBUG] 全部控件:", scanned.map(function(it) { return {
+        tag: it.type, selector: it.selector, label: it.label.substring(0,40)
+      }; }));
+    }
+
+    // strategyLevel: 0|1|2|3 只跑指定策略；不传或 -1 跑全部 S0→S3
+    var sl = (typeof strategyLevel === "number" && strategyLevel >= 0) ? strategyLevel : -1;
+
+    var result;
+
+    if (sl === -1 || sl === 0) {
+      result = tryS0Match(step, scanned);
+      if (result) return result;
+    }
+
+    if (sl === -1 || sl === 1) {
+      result = tryS1Match(step, scanned);
+      if (result) return result;
+    }
+
+    if (sl === -1 || sl === 2) {
+      result = tryS2Match(step, scanned);
+      if (result) return result;
+    }
+
+    if (sl === -1 || sl === 3) {
+      result = tryS3Match(step, scanned);
+      if (result) return result;
+    }
+
     return null;
   }
 
@@ -755,6 +930,58 @@
     });
   }
 
+  // 通过 /rest?method=appguide.flows.byid 获取完整 flow 数据并缓存到本地
+  // 返回归一化后的 { id, title, starturl, pages } 或 null（失败时）
+  function fetchFlowById(flowId) {
+    return new Promise(function(resolve) {
+      try {
+        chrome.runtime.sendMessage(
+          { action: "fetch-flow-by-id", flowId: flowId },
+          function(response) {
+            if (chrome.runtime.lastError) {
+              console.warn("[BusinessGuide] fetchFlowById 通信失败:", chrome.runtime.lastError.message);
+              resolve(null);
+              return;
+            }
+            if (response && response.success && response.data && response.data.success) {
+              resolve(normalizeFlowData(response.data.data));
+            } else {
+              console.warn("[BusinessGuide] fetchFlowById API 返回失败，将回退到 API 续接");
+              resolve(null);
+            }
+          }
+        );
+      } catch (e) {
+        console.warn("[BusinessGuide] fetchFlowById 异常:", e.message);
+        resolve(null);
+      }
+    });
+  }
+
+  // 归一化 /api/flows/by-id 返回的原始数据为标准格式
+  // rawData.steps 可能是：字符串(JSON)、数组(pages)、对象({pages:[],title:""})
+  function normalizeFlowData(rawData) {
+    if (!rawData) return null;
+    var stepsData = rawData.steps;
+    if (typeof stepsData === "string") {
+      try { stepsData = JSON.parse(stepsData); } catch (e) { stepsData = {}; }
+    }
+    var pages;
+    if (Array.isArray(stepsData)) {
+      pages = stepsData;
+    } else if (stepsData && Array.isArray(stepsData.pages)) {
+      pages = stepsData.pages;
+    } else {
+      pages = [];
+    }
+    return {
+      id: rawData.id,
+      title: (stepsData && stepsData.title) || rawData.class || "",
+      starturl: rawData.starturl || "",
+      pages: pages
+    };
+  }
+
   // 读取跨页流程运行时状态，并做TTL过期判断（过期则顺手清空，返回null）
   function getFlowStateIfValid() {
     return new Promise((resolve) => {
@@ -784,15 +1011,19 @@
     });
   }
 
-  // 记录"接下来应该显示第几步"（globalStepNumber），每次渲染/翻页都要调用
-  function persistFlowState(nextGlobalStepNumber) {
+  // 记录"接下来应该显示第几步"（globalStepNumber + pageIndex），每次渲染/翻页都要调用
+  // nextPageIndex: 可选，跨页过渡时传入下一页索引；未传则使用当前 flowMeta.pageIndex
+  function persistFlowState(nextGlobalStepNumber, nextPageIndex) {
     if (!flowMeta) return;
+    var pageIndex = (nextPageIndex !== undefined) ? nextPageIndex : flowMeta.pageIndex;
     try {
       chrome.storage.local.set({
         [FLOW_STATE_KEY]: {
           flowId: flowMeta.flowId,
+          pageIndex: pageIndex,
           globalStepNumber: nextGlobalStepNumber,
           lastActiveAt: Date.now(),
+          cachedFlow: flowMeta.cachedFlow || null,
         },
       });
     } catch (e) {
@@ -812,20 +1043,138 @@
   function getCleanPath() {
     return window.location.href
       .replace(/^https?:\/\//i, "")
+      .replace(/^www\./i, "")
       .replace(/[?#].*$/, "")
       .replace(/\/+$/, "");
       //.toLowerCase() || "/";
   }
 
-  // URL 归一化比较：去协议、query、hash、尾斜杠、www. 前缀，转小写
-  // 用于客户端判断 startUrl 与当前页面是否为"同一页面"
-  function normalizeUrlForMatch(rawUrl) {
-    return rawUrl
-      .replace(/^https?:\/\//i, "")
-      .replace(/^www\./i, "")
-      .replace(/[?#].*$/, "")
-      .replace(/\/+$/, "")
-      .toLowerCase();
+  // ------------------ 客户端 URL 匹配引擎（移植自 guide_server.ts）------------------
+  // 使客户端可以在不调用 API 的情况下，本地完成 URL→页面匹配，实现离线续接。
+
+  function parseUrlSafely(rawUrl) {
+    const withScheme = /^https?:\/\//i.test(rawUrl) ? rawUrl : `https://${rawUrl}`;
+    try {
+      return new URL(withScheme);
+    } catch {
+      return new URL("https://invalid.invalid");
+    }
+  }
+
+  function normalizeHost(rawUrl) {
+    try {
+      return parseUrlSafely(rawUrl).host.replace(/^www\./i, "").toLowerCase();
+    } catch {
+      return "";
+    }
+  }
+
+  function normalizePathSegments(rawUrl) {
+    try {
+      return parseUrlSafely(rawUrl).pathname.split("/").filter(Boolean);
+    } catch {
+      return rawUrl.split("/").filter(Boolean);
+    }
+  }
+
+  function looksLikeDynamicId(segment) {
+    if (!segment) return false;
+    if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(segment)) return true;
+    if (/^\d{6,}$/.test(segment)) return true;
+    if (segment.length >= 8 && /[a-zA-Z]/.test(segment) && /[0-9]/.test(segment)) return true;
+    return false;
+  }
+
+  function urlsMatchClient(rawUrlA, rawUrlB) {
+    if (normalizeHost(rawUrlA) !== normalizeHost(rawUrlB)) return false;
+    const segsA = normalizePathSegments(rawUrlA);
+    const segsB = normalizePathSegments(rawUrlB);
+    if (segsA.length !== segsB.length) return false;
+    for (let i = 0; i < segsA.length; i++) {
+      if (segsA[i] === segsB[i]) continue;
+      if (looksLikeDynamicId(segsA[i]) && looksLikeDynamicId(segsB[i])) continue;
+      return false;
+    }
+    return true;
+  }
+
+  // 在缓存的完整 flow 数据中，用当前 URL 匹配某一页，返回与 API 同构的 ResolvedPage
+  function resolvePageInFlowClient(cachedFlow, rawUrl) {
+    if (!cachedFlow || !cachedFlow.pages) return null;
+
+    let pageIndex = cachedFlow.pages.findIndex(function(p) { return urlsMatchClient(p.url, rawUrl); });
+
+    // 兜底：pages[].url 里没找到，但当前url就是 starturl
+    if (pageIndex === -1 && cachedFlow.pages.length > 0 && urlsMatchClient(cachedFlow.starturl, rawUrl)) {
+      pageIndex = 0;
+    }
+
+    if (pageIndex === -1) return null;
+
+    var globalStepOffset = 0;
+    for (var i = 0; i < pageIndex; i++) {
+      globalStepOffset += cachedFlow.pages[i].steps.length;
+    }
+    var totalSteps = cachedFlow.pages.reduce(function(sum, p) { return sum + p.steps.length; }, 0);
+
+    var page = cachedFlow.pages[pageIndex];
+    var steps = page.steps.map(function(s, localIndex) {
+      return Object.assign({}, s, {
+        localIndex: localIndex,
+        globalStepNumber: globalStepOffset + localIndex + 1
+      });
+    });
+
+    return {
+      flowId: cachedFlow.id,
+      flowTitle: cachedFlow.title,
+      pageIndex: pageIndex,
+      totalPages: cachedFlow.pages.length,
+      globalStepOffset: globalStepOffset,
+      totalSteps: totalSteps,
+      page: {
+        url: page.url,
+        title: page.title,
+        description: page.description,
+        steps: steps
+      }
+    };
+  }
+
+  // 不做 URL 匹配，直接按 pageIndex 返回该页的 ResolvedPage
+  // 用于 URL 不匹配但用户选择"继续引导"的场景
+  function resolvePageByIndex(cachedFlow, pageIndex) {
+    if (!cachedFlow || !cachedFlow.pages) return null;
+    if (pageIndex < 0 || pageIndex >= cachedFlow.pages.length) return null;
+
+    var globalStepOffset = 0;
+    for (var i = 0; i < pageIndex; i++) {
+      globalStepOffset += cachedFlow.pages[i].steps.length;
+    }
+    var totalSteps = cachedFlow.pages.reduce(function(sum, p) { return sum + p.steps.length; }, 0);
+
+    var page = cachedFlow.pages[pageIndex];
+    var steps = page.steps.map(function(s, localIndex) {
+      return Object.assign({}, s, {
+        localIndex: localIndex,
+        globalStepNumber: globalStepOffset + localIndex + 1
+      });
+    });
+
+    return {
+      flowId: cachedFlow.id,
+      flowTitle: cachedFlow.title,
+      pageIndex: pageIndex,
+      totalPages: cachedFlow.pages.length,
+      globalStepOffset: globalStepOffset,
+      totalSteps: totalSteps,
+      page: {
+        url: page.url,
+        title: page.title,
+        description: page.description,
+        steps: steps
+      }
+    };
   }
 
   // 核心功能：开关引导（用户手动按 Alt+G 触发）
@@ -834,6 +1183,31 @@
     console.log("[BusinessGuide] 正在检测页面并获取 API 校验...", cleanPath);
 
     const state = await getFlowStateIfValid();
+
+    // 缓存优先：以 state.pageIndex 为目标页，只比对这一页的 URL，避免跳到流程中其他页
+    if (state && state.cachedFlow) {
+      var targetIdx = (typeof state.pageIndex === "number") ? state.pageIndex : 0;
+      if (targetIdx >= 0 && targetIdx < state.cachedFlow.pages.length) {
+        var expectedPage = state.cachedFlow.pages[targetIdx];
+        if (urlsMatchClient(expectedPage.url, window.location.href)) {
+          var resolved = resolvePageByIndex(state.cachedFlow, targetIdx);
+          console.log("[BusinessGuide] 从本地缓存续接跨页流程（手动 Alt+G）：", state.flowId,
+            "（第" + (targetIdx + 1) + "/" + state.cachedFlow.pages.length + "页）");
+          startGuideFromResolved(resolved, state);
+          return;
+        }
+        // URL 不匹配 → 直接按继续引导处理
+        console.log("[BusinessGuide] 手动 Alt+G：当前 URL 与流程预期页面不匹配，直接继续引导");
+        var resolved = resolvePageByIndex(state.cachedFlow, targetIdx);
+        if (resolved) {
+          startGuideFromResolved(resolved, state);
+        } else {
+          showToast("❌ 无法加载预期页面数据");
+        }
+        return;
+      }
+      // pageIndex 异常，回退 API
+    }
 
     try {
       const data = await fetchGuideFromApi(cleanPath, state ? state.flowId : null);
@@ -849,7 +1223,7 @@
   // manual=false 表示这是页面加载时的被动自动检测，只在 resume 时才动作，其余情况保持安静。
   function handleGuideApiResult(data, cleanPath, state, manual) {
     if (!data) {
-      if (manual) showToast("❌ 业务指南网络服务端点连接失败");
+      if (manual) showToast("❌ 引导步骤数据解析失败");
       return;
     }
 
@@ -859,6 +1233,12 @@
     }
 
     if (!manual) return; // 被动检测：非resume结果一律静默忽略
+
+    // 如果有进行中的流程但 API 返回的不是 resume，阻止回退到"启动新流程"路径
+    if (state) {
+      showToast("💡 当前页面不在流程路径中，请导航到正确页面后重试。");
+      return;
+    }
 
     if (data.success && data.mode === "new") {
       startGuideFromResolved(data, null);
@@ -872,20 +1252,24 @@
       showToast("💡 " + (data.message || "当前页面未配置特定的业务操作指南入口"));
       return;
     }
-    showToast("❌ 业务指南网络服务端点连接失败");
+    showToast("❌ 未知错误，请检查控制台日志");
+    console.error("[BusinessGuide] 未知错误:", data);
   }
 
-  // 根据 /api/guide 返回的已解析页面数据，启动/续接引导渲染
+  // 根据 /api/guide 返回的已解析页面数据（或客户端本地解析结果），启动/续接引导渲染
   // resumeState：仅当data.mode==="resume"且是从storage续接来的时候传入，
   // 用于把之前存的globalStepNumber换算成这一页内的localIndex，从而精确停在原来的步骤上；
   // 否则（全新流程/用户手动选择流程）一律从这一页第一步开始。
   function startGuideFromResolved(data, resumeState) {
+    // 优先继承已有缓存，其次从本次 API 响应中获取（暂未有 fullFlow 字段，预留）
+    var inheritedCache = (resumeState && resumeState.cachedFlow) || data.fullFlow || null;
     flowMeta = {
       flowId: data.flowId,
       pageIndex: data.pageIndex,
       totalPages: data.totalPages,
       globalStepOffset: data.globalStepOffset,
       totalSteps: data.totalSteps,
+      cachedFlow: inheritedCache,
     };
     activeGuide = {
       title: data.flowTitle,
@@ -903,6 +1287,11 @@
     currentStepIndex = startLocalIndex;
     isGuideActive = true;
 
+    // 每次开始/续接一次引导，都要把"本页已被占用的元素"清空重来。
+    // usedElements 只在脚本加载时创建过一次，如果不在这里重置，
+    // 上一个流程（或上一轮同一流程）占用过的元素会一直被当成"已用"而跳过。
+    usedElements = new WeakSet();
+
     // 统计：流程被激活（新流程或续接）
     trackFlowStat(data.flowId, "process");
 
@@ -917,6 +1306,116 @@
     persistFlowState(activeGuide.steps[currentStepIndex].globalStepNumber);
     console.log("[BusinessGuide] 已加载业务流程指南：" + activeGuide.title +
       `（第${data.pageIndex + 1}/${data.totalPages}页，步骤${activeGuide.steps[currentStepIndex].globalStepNumber}/${data.totalSteps}）`);
+
+    // 如果还没有缓存完整流程数据，异步获取并缓存（fire-and-forget，不阻塞当前渲染）
+    if (!flowMeta.cachedFlow && data.flowId) {
+      fetchFlowById(data.flowId).then(function(cached) {
+        if (cached && flowMeta) {
+          flowMeta.cachedFlow = cached;
+          // 更新存储中的 cachedFlow
+          persistFlowState(activeGuide.steps[currentStepIndex].globalStepNumber);
+          console.log("[BusinessGuide] 完整流程数据已缓存到本地，共 " + cached.pages.length + " 页");
+        }
+      }).catch(function() {
+        // 静默忽略，续接时回退 API
+      });
+    }
+  }
+
+  // 使浮动窗口可拖动：给 header 区域绑定 mousedown/move/up 事件
+  function makeDraggable(dragHandle, targetElement) {
+    var startX, startY, startLeft, startTop;
+    var dragging = false;
+
+    dragHandle.style.cursor = "move";
+
+    function onMouseMove(e) {
+      if (!dragging) return;
+      var dx = e.clientX - startX;
+      var dy = e.clientY - startY;
+      targetElement.style.left = Math.max(0, startLeft + dx) + "px";
+      targetElement.style.top = Math.max(0, startTop + dy) + "px";
+    }
+
+    function onMouseUp() {
+      dragging = false;
+      document.removeEventListener("mousemove", onMouseMove);
+      document.removeEventListener("mouseup", onMouseUp);
+    }
+
+    dragHandle.addEventListener("mousedown", function(e) {
+      if (e.target.tagName === "BUTTON") return; // 不拦截按钮点击
+      dragging = true;
+      startX = e.clientX;
+      startY = e.clientY;
+      startLeft = parseInt(targetElement.style.left, 10) || 0;
+      startTop = parseInt(targetElement.style.top, 10) || 0;
+      targetElement.style.transform = ""; // 清除居中偏移
+      e.preventDefault();
+      document.addEventListener("mousemove", onMouseMove);
+      document.addEventListener("mouseup", onMouseUp);
+    });
+  }
+
+  // URL 不匹配确认框：缓存续接时当前页面 URL 与流程预期页面不一致，让用户选择继续或放弃
+  function showUrlMismatchDialog(cachedFlow, expectedPageIndex, state) {
+    cleanupUI();
+
+    var expectedPage = cachedFlow.pages[expectedPageIndex];
+    var expectedUrl = expectedPage ? expectedPage.url : "（未知）";
+    var currentUrl = window.location.href;
+
+    bubbleElement = document.createElement("div");
+    bubbleElement.className = "guide-extension-bubble";
+    bubbleElement.innerHTML =
+      '<div class="guide-header">' +
+        '<span><img src="' + ICON_URL + '" style="width:16px;height:16px;vertical-align:middle;margin-right:6px;">智导业务操作领航</span>' +
+        '<button id="guide-close-btn" class="guide-btn-close">×</button>' +
+      '</div>' +
+      '<div class="guide-body">' +
+        '<h3 class="guide-step-title">⚠ 页面不匹配</h3>' +
+        '<p class="guide-step-desc">当前页面 URL 与流程预期不符：</p>' +
+        '<div style="margin:8px 0;padding:8px;border-radius:4px;font-size:12px;line-height:1.6;">' +
+          '<div><strong>流程：</strong>' + escapeHtml(cachedFlow.title) + '</div>' +
+          '<div><strong>预期页面（第' + (expectedPageIndex + 1) + '/' + cachedFlow.pages.length + '页）：</strong>' + escapeHtml(expectedUrl) + '</div>' +
+          '<div style="word-break:break-all;"><strong>当前页面：</strong>' + escapeHtml(currentUrl) + '</div>' +
+        '</div>' +
+        '<p class="guide-step-desc">是否仍要继续引导？</p>' +
+        '<div class="guide-mismatch-actions">' +
+          '<button id="guide-mismatch-abort" class="guide-mismatch-btn">中止引导流程</button>' +
+          '<button id="guide-mismatch-continue" class="guide-mismatch-btn-primary">继续当前页面</button>' +
+        '</div>' +
+      '</div>';
+    document.body.appendChild(bubbleElement);
+
+    document.getElementById("guide-close-btn").onclick = function() {
+      // 关闭 = 放弃，保留进度
+      cleanupUI();
+      showToast("引导已取消，请导航到正确页面后重试。");
+    };
+
+    document.getElementById("guide-mismatch-abort").onclick = function() {
+      cleanupUI();
+      clearFlowState();
+      showToast("引导流程已中止，本地进度已清除。");
+    };
+
+    document.getElementById("guide-mismatch-continue").onclick = function() {
+      cleanupUI();
+      var resolved = resolvePageByIndex(cachedFlow, expectedPageIndex);
+      if (resolved) {
+        console.log("[BusinessGuide] 用户选择在 URL 不匹配的情况下继续引导");
+        startGuideFromResolved(resolved, state);
+      } else {
+        showToast("❌ 无法加载预期页面数据");
+      }
+    };
+
+    positionBubble(null, "top");
+
+    // 启用拖动：按住标题栏可拖动整个浮动窗口
+    var headerEl = bubbleElement.querySelector(".guide-header");
+    if (headerEl) makeDraggable(headerEl, bubbleElement);
   }
 
   // 多个流程共享同一起始页时，展示候选列表让用户选择
@@ -931,13 +1430,13 @@
         <button id="guide-close-btn" class="guide-btn-close">×</button>
       </div>
       <div class="guide-body">
-        <h3 class="guide-step-title">检测到多个可用引导流程</h3>
+        <h3 class="guide-step-title">当前页检测到${candidates.length}个可用引导流程</h3>
         <p class="guide-step-desc">请选择要开始的流程：</p>
         <div class="guide-candidate-list">
-          ${candidates.map(c => `
+          ${candidates.map((c, i) => `
             <button class="guide-candidate-item" data-flow-id="${c.flowId}">
-              <strong>${c.title}</strong>
-              <span>${c.description || ""}</span>
+              <strong>${i + 1}. ${escapeHtml(c.title)}</strong>
+              <span>${escapeHtml(c.description || "")}</span>
             </button>
           `).join("")}
         </div>
@@ -961,6 +1460,10 @@
     });
 
     positionBubble(null, "top");
+
+    // 启用拖动
+    var headerEl2 = bubbleElement.querySelector(".guide-header");
+    if (headerEl2) makeDraggable(headerEl2, bubbleElement);
   }
 
   function disableGuide() {
@@ -969,13 +1472,14 @@
     flowMeta = null;
     cleanupUI();
     clearFlowState();
+    usedElements = new WeakSet();
     console.log("[BusinessGuide] 业务操作引导已关闭，进行中的流程状态已清除。");
   }
 
   // 渲染/重绘 高亮框与浮窗气泡
   let renderRequestToken = 0; // 每次渲染自增，用于让过期的异步重试/iframe探测结果自动作废
 
-  const LOCAL_RETRY_COUNT = 3;
+  const LOCAL_RETRY_COUNT = 2;
   const LOCAL_RETRY_DELAY_MS = 400;
 
   // 等"DOM发生变化"或者"到时间了"，两者谁先发生就算——
@@ -1031,6 +1535,7 @@
           } else {
             console.log(`[BusinessGuide] 本地匹配(${local.scorePercent}%)优于或等于iframe，采用本地结果`);
             usedElements.add(local.element);
+            stepMatchedElements.set(step, local.element);
             createHighlightForElement(local.element, step.highlightStyle);
             renderBubble(step, local.element);
           }
@@ -1039,6 +1544,7 @@
       }
 
       usedElements.add(local.element);
+      stepMatchedElements.set(step, local.element);
       createHighlightForElement(local.element, step.highlightStyle);
       renderBubble(step, local.element);
       return;
@@ -1052,14 +1558,14 @@
       return;
     }
 
-    // 本文档没找到：如果是顶层且页面里确实有iframe，广播去问一次子文档；
+    // 本文档没找到：如果是顶层且页面里确实有iframe，启动逐级联配（S0→S3 主页+iframe交替）；
     // 否则（不是顶层，或者顶层但没有iframe）直接判定未找到。
     // 注：当前只处理单层嵌套，不会让子iframe再往下递归探测自己的子iframe。
     const iframeEls = IS_TOP_FRAME ? Array.from(document.querySelectorAll("iframe")) : [];
     console.log(
       `[BusinessGuide] 本文档内未找到"${step.title}"（已重试${LOCAL_RETRY_COUNT}次），` +
       (IS_TOP_FRAME
-        ? `检测到页面内共有 ${iframeEls.length} 个<iframe>` + (iframeEls.length > 0 ? "，开始向它们广播探测请求..." : "，无iframe可探测，直接判定未找到。")
+        ? `检测到页面内共有 ${iframeEls.length} 个<iframe>` + (iframeEls.length > 0 ? "，启动逐级联配..." : "，无iframe可探测，直接判定未找到。")
         : "（当前是iframe worker身份，不会再往下探测子iframe）")
     );
     if (iframeEls.length === 0) {
@@ -1067,17 +1573,26 @@
       return;
     }
 
-    probeChildFrames(step, iframeEls).then((bestIframe) => {
-      // 探测是异步的，回来的时候用户可能已经点了下一步/关闭了引导/翻到了别的步骤，
-      // 用token校验一下，过期的结果直接丢弃，不能覆盖当前状态。
+    resolveStepInterleaved(step, myToken).then(function(interleaved) {
+      // 逐级联配是异步的，用token校验过期结果
       if (myToken !== renderRequestToken) return;
       if (!isGuideActive || !activeGuide || activeGuide.steps[currentStepIndex] !== step) return;
 
-      if (bestIframe) {
-        // 高亮已经由匹配到目标的那个iframe自己画好了（见文件顶部iframe worker消息处理），
-        // 顶层这里只需要把气泡贴着这个iframe的边界摆放即可，不需要（也没法）自己再画一次高亮。
-        renderBubble(step, bestIframe.iframeEl);
+      if (interleaved) {
+        if (interleaved.source === "iframe") {
+          // 高亮已由匹配到的iframe自己画好，顶层只需把气泡贴着iframe边界摆放
+          console.log(`[BusinessGuide] 逐级联配命中iframe目标，置信度: ${interleaved.scorePercent}%`);
+          renderBubble(step, interleaved.element);
+        } else {
+          // 主页匹配：画高亮 + 气泡
+          console.log(`[BusinessGuide] 逐级联配命中主页目标: ${interleaved.matchMethod}，置信度: ${interleaved.scorePercent}%`);
+          usedElements.add(interleaved.element);
+          stepMatchedElements.set(step, interleaved.element);
+          createHighlightForElement(interleaved.element, step.highlightStyle);
+          renderBubble(step, interleaved.element);
+        }
       } else {
+        console.log(`[BusinessGuide] 逐级联配也未找到"${step.title}"，所有策略已穷尽`);
         handleTargetNotFound(step);
       }
     });
@@ -1093,24 +1608,55 @@
     const step = activeGuide.steps[currentStepIndex];
     if (!step) return;
 
+    // 同一个步骤被重渲染（上一步/下一步来回切、异步重试、低置信度时的iframe并行探测）时，
+    // 先把它自己上一轮占用的元素释放掉——否则 pickPreferUnused 会把它当成"别的步骤已经用过"
+    // 而跳过，同一个步骤第二次渲染就会跳到另一个元素上。
+    const prevMatched = stepMatchedElements.get(step);
+    if (prevMatched) {
+      usedElements.delete(prevMatched);
+      stepMatchedElements.delete(step);
+    }
+
     attemptResolveStep(step, myToken, LOCAL_RETRY_COUNT);
   }
 
   // 只在"当前文档自己的DOM"里找目标元素（不涉及iframe）。
   // 顶层和iframe worker共用这一份逻辑：顶层用它来处理本页字段，
   // iframe worker收到顶层探测请求时，也是调用这个函数来判断自己是否有匹配的控件。
-  function resolveLocalTarget(step) {
+  // skipSelector: 为true时跳过显式selector查找，直接进入语义匹配（供上层在iframe探测失败后回调使用）
+  // strategyLevel: 0|1|2|3 限定语义匹配的策略级别；不传则跑全部 S0→S3
+  function resolveLocalTarget(step, skipSelector, strategyLevel) {
     let targetElement = null;
     let matchMethod = "精确选择器定位";
     let scorePercent = 100;
 
-    if (step.selector && step.selector !== "auto") {
+    if (!skipSelector && step.selector && step.selector !== "auto") {
       targetElement = document.querySelector(step.selector);
+      if (targetElement) {
+        step.resolvedSelector = step.selector;
+        return { element: targetElement, matchMethod, scorePercent };
+      }
+      // 显式selector未命中：
+      // 顶层且有iframe → 返回null，由上层 resolveStepInterleaved 控制逐级联配；
+      // 无iframe或iframe worker → fall through到下方语义匹配
+      if (IS_TOP_FRAME && document.querySelectorAll("iframe").length > 0) {
+        console.log(`[BusinessGuide] 选择器 "${step.selector}" 在当前文档未命中，页面有iframe，交由逐级联配...`);
+        return null;
+      }
+      // 无iframe或iframe worker：继续往下走语义匹配
+    }
+
+    // 无显式selector（或selector为auto）且顶层有iframe：
+    // 不在主页单独跑语义匹配，返回null交由上层 resolveStepInterleaved 做主页+iframe逐级联配，
+    // 避免主页低分匹配截胡iframe里的正确目标
+    if (!skipSelector && IS_TOP_FRAME && document.querySelectorAll("iframe").length > 0) {
+      console.log(`[BusinessGuide] 无显式selector且页面有iframe，交由逐级联配处理...`);
+      return null;
     }
 
     if (!targetElement) {
-      console.log(`[BusinessGuide] 选择器 "${step.selector}" 缺失，正在启动本地语义匹配...`);
-      const semanticMatch = findBestSemanticMatch(step);
+      console.log(`[BusinessGuide] 选择器 "${step.selector}" 缺失或未命中，正在启动本地语义匹配...`);
+      const semanticMatch = findBestSemanticMatch(step, strategyLevel);
 
       if (semanticMatch) {
         targetElement = semanticMatch.element;
@@ -1164,8 +1710,6 @@
         console.warn("[BusinessGuide] 未能在页面中匹配到符合要求的元素");
         step.resolvedSelector = null;
       }
-    } else {
-      step.resolvedSelector = step.selector;
     }
 
     if (!targetElement) return null;
@@ -1265,6 +1809,178 @@
     });
   }
 
+  // 逐级策略专用：向所有直属子iframe广播探测，每个iframe只运行指定策略级别。
+  // 与 probeChildFrames 不同：单轮探测（不重试），携带 strategyLevel 让 iframe worker 限制匹配范围。
+  function probeChildFramesWithStrategy(step, iframeEls, strategyLevel) {
+    return new Promise(function(resolve) {
+      var requestId = "req_s" + Date.now() + "_" + Math.random().toString(36).slice(2);
+      var settled = false;
+      var bestResult = null; // { iframeEl, score }
+      // 已经回过话的iframe（按contentWindow去重，同一个iframe重复回复不会把计数刷爆）。
+      // 这一轮的语义是"等所有iframe都回复完，再从中挑分最高的"，所以需要知道还差几份回复。
+      var repliedSources = new Set();
+      var sentCount = 0;
+      var timeoutId = null;
+
+      var serializedStep = {
+        title: step.title,
+        description: step.description,
+        selector: step.selector,
+        tipPosition: step.tipPosition,
+        highlightStyle: step.highlightStyle,
+        clickText: step.clickText,
+        actionType: step.actionType,
+        strategyLevel: strategyLevel,
+      };
+
+      // 收工：收齐全部回复、或等待超时，两条路都走这里
+      function finish(reason) {
+        if (settled) return;
+        settled = true;
+        if (timeoutId) clearTimeout(timeoutId);
+        window.removeEventListener("message", onMessage);
+        if (bestResult) {
+          console.log("[BusinessGuide][S" + strategyLevel + "] 探测结束（" + reason + "），选取最佳iframe结果，置信度: " + bestResult.score + "%");
+        } else {
+          console.warn("[BusinessGuide][S" + strategyLevel + "] 探测结束（" + reason + "），无iframe回复找到目标");
+        }
+        resolve(bestResult);
+      }
+
+      function onMessage(event) {
+        var data = event.data;
+        if (!data || data.__appguide !== true || data.type !== "find-result") return;
+        if (data.requestId !== requestId) return;
+
+        if (event.source) repliedSources.add(event.source);
+        var progress = "已收 " + repliedSources.size + "/" + sentCount + " 份回复";
+
+        if (data.found) {
+          var matchedIframe = iframeEls.find(function(el) { return el.contentWindow === event.source; });
+          if (matchedIframe) {
+            var score = typeof data.score === "number" ? data.score : 0;
+            console.log("[BusinessGuide][S" + strategyLevel + "] 某个iframe回复找到目标，置信度: " + score + "%（" + progress + "）");
+            if (!bestResult || score > bestResult.score) {
+              bestResult = { iframeEl: matchedIframe, score: score };
+            }
+          } else {
+            console.warn("[BusinessGuide][S" + strategyLevel + "] 收到found:true但反查不到对应iframe，已丢弃。（" + progress + "）");
+          }
+        } else {
+          console.log("[BusinessGuide][S" + strategyLevel + "] 某个iframe回复没找到（" + progress +
+            (bestResult ? "，当前最佳 " + bestResult.score + "%" : "，暂无iframe找到") + "）");
+        }
+
+        // 这一轮要的是"所有iframe里分最高的那个"，回复收齐了就没必要再空等剩下的超时时间——
+        // 逐级联配最多跑S0→S3四轮，每轮白等800ms的话用户能明显感觉到引导卡顿。
+        if (repliedSources.size >= sentCount) {
+          finish("已收齐全部回复");
+        }
+      }
+      window.addEventListener("message", onMessage);
+
+      iframeEls.forEach(function(el, idx) {
+        try {
+          if (!el.contentWindow) {
+            console.warn("[BusinessGuide][S" + strategyLevel + "] 第" + (idx + 1) + "个<iframe>无可用contentWindow，跳过。");
+            return;
+          }
+          el.contentWindow.postMessage(
+            { __appguide: true, type: "find", requestId: requestId, step: serializedStep },
+            "*"
+          );
+          sentCount++;
+        } catch (e) {
+          console.warn("[BusinessGuide][S" + strategyLevel + "] 向第" + (idx + 1) + "个<iframe>广播失败:", e);
+        }
+      });
+      console.log("[BusinessGuide][S" + strategyLevel + "] 已向 " + sentCount + "/" + iframeEls.length + " 个<iframe>广播探测（单轮），最多等待" + IFRAME_PROBE_TIMEOUT_MS + "ms");
+
+      // 一个都没发出去（iframe全都拿不到contentWindow/postMessage全失败）：不可能有回复，直接收工
+      if (sentCount === 0) {
+        finish("没有可探测的iframe");
+        return;
+      }
+
+      timeoutId = setTimeout(function() {
+        finish("等待超时");
+      }, IFRAME_PROBE_TIMEOUT_MS);
+    });
+  }
+
+  // 逐级联配编排函数：主页 S0 → iframe S0 → 主页 S1 → iframe S1 → ... → S3
+  // 返回 { element, matchMethod, scorePercent, source: 'main'|'iframe' } 或 null
+  async function resolveStepInterleaved(step, myToken) {
+    var scanned = scanDOM();
+
+    // 逐级联配是直接调 tryS*Match 的，不走 findBestSemanticMatch，
+    // 那边的"全部控件"调试输出在这条路径上永远打不出来——排查时看不到候选池等于抓瞎。
+    if (window.__appguideDebug) {
+      console.log("[DEBUG] 逐级联配 步骤:", step.title, "扫描到", scanned.length, "个控件:",
+        scanned.map(function (it) { return { tag: it.type, selector: it.selector, label: it.label.substring(0, 40) }; }));
+    }
+
+    var iframeEls = IS_TOP_FRAME
+      ? Array.from(document.querySelectorAll("iframe")).filter(function(el) { return el.contentWindow; })
+      : [];
+
+    var strategies = [
+      { level: 0, fn: tryS0Match, name: "S0" },
+      { level: 1, fn: tryS1Match, name: "S1" },
+      { level: 2, fn: tryS2Match, name: "S2" },
+      { level: 3, fn: tryS3Match, name: "S3" },
+    ];
+
+    for (var i = 0; i < strategies.length; i++) {
+      var strategy = strategies[i];
+
+      // 令牌检查：用户是否已经点了下一步/关闭了引导
+      if (myToken !== renderRequestToken) return null;
+
+      console.log("[BusinessGuide] " + strategy.name + " 主页尝试匹配...");
+
+      // 1. 主页尝试
+      var mainResult = strategy.fn(step, scanned);
+      if (mainResult) {
+        usedElements.add(mainResult.element);
+        stepMatchedElements.set(step, mainResult.element);
+        step.resolvedSelector = mainResult.selector;
+        console.log("[BusinessGuide] " + strategy.name + " 主页命中! label: " + mainResult.label.substring(0, 30) + " score: " + mainResult.score);
+        return {
+          element: mainResult.element,
+          matchMethod: "语义-" + strategy.name + " [主页]",
+          scorePercent: Math.round(mainResult.score * 100),
+          source: "main"
+        };
+      }
+
+      console.log("[BusinessGuide] " + strategy.name + " 主页未命中");
+
+      // 2. 主页失败，探测 iframe（单轮，不重试）
+      if (iframeEls.length > 0) {
+        console.log("[BusinessGuide] " + strategy.name + " 探测iframe...");
+        var bestIframe = await probeChildFramesWithStrategy(step, iframeEls, strategy.level);
+
+        if (myToken !== renderRequestToken) return null;
+
+        if (bestIframe) {
+          console.log("[BusinessGuide] " + strategy.name + " iframe命中! score: " + bestIframe.score + "%");
+          return {
+            element: bestIframe.iframeEl,
+            matchMethod: "语义-" + strategy.name + " [iframe]",
+            scorePercent: bestIframe.score,
+            source: "iframe"
+          };
+        }
+
+        console.log("[BusinessGuide] " + strategy.name + " iframe也未命中，降级下一策略");
+      }
+    }
+
+    console.warn("[BusinessGuide] 全部策略（S0-S3）主页+iframe均已耗尽，未找到目标");
+    return null;
+  }
+
   // 弹出确认对话框：询问用户是否跳过当前未找到控件的步骤，继续下一步。
   // onContinue：用户选择"继续下一步"；onAbort：用户选择"中止引导"。
   function showConfirmDialog(step, onContinue, onAbort) {
@@ -1280,7 +1996,7 @@
         <div>
           <p class="guide-confirm-title">未找到当前步骤对应的页面控件</p>
           <p class="guide-confirm-desc">
-            当前步骤 <span class="guide-confirm-step-name">"${step.title}"</span> 未能在页面中匹配到相关操作，是否跳过本步、继续下一步？
+            当前步骤 <span class="guide-confirm-step-name">"${escapeHtml(step.title)}"</span> 未能在页面中匹配到相关操作，是否跳过本步、继续下一步？
           </p>
         </div>
       </div>
@@ -1366,15 +2082,15 @@
 
     bubbleElement.innerHTML = `
       <div class="guide-header">
-        <span><img src="${ICON_URL}" style="width:16px;height:16px;vertical-align:middle;margin-right:6px;">智导业务操作领航：${activeGuide.title}</span>
+        <span><img src="${ICON_URL}" style="width:16px;height:16px;vertical-align:middle;margin-right:6px;">智导业务操作领航：${escapeHtml(activeGuide.title)}</span>
         <button id="guide-close-btn" class="guide-btn-close">×</button>
       </div>
       <div class="guide-body">
         <h3 class="guide-step-title">
           <span class="guide-step-num">步骤 ${globalNum}</span>
-          ${step.title}
+          ${escapeHtml(step.title)}
         </h3>
-        <p class="guide-step-desc">${step.description}</p>
+        <p class="guide-step-desc">${escapeHtml(step.description)}</p>
       </div>
       <div class="guide-footer">
         <span class="guide-progress">进度: ${globalNum} / ${totalNum}</span>
@@ -1514,7 +2230,7 @@
       // 本页步骤已走完，但流程还有后续页面——不清空流程进度，只收起当前UI，
       // 等用户跳转到下一页（真实业务系统的页面跳转）后，被动型自动续接逻辑会接上。
       const lastGlobalNum = activeGuide.steps[currentStepIndex].globalStepNumber;
-      persistFlowState(lastGlobalNum + 1);
+      persistFlowState(lastGlobalNum + 1, flowMeta.pageIndex + 1);
       showToast("✅ 本页操作已完成，请前往下一步骤对应页面，按 Alt+G 继续引导。");
       isGuideActive = false;
       activeGuide = null;
@@ -1586,7 +2302,7 @@
     container.className = "guide-extension-flow-notify";
     container.innerHTML =
       `<div class="gf-notify-header">
-        <span>当前页面及子页面有 <strong>${flows.length}</strong> 个引导流程</span>
+        <span>当前页及子页面有 <strong>${flows.length}</strong> 个引导流程</span>
         <div class="gf-notify-header-right">
           <span class="gf-notify-arrow">▾</span>
           <button class="gf-notify-close-btn" title="关闭">×</button>
@@ -1599,7 +2315,7 @@
             <span class="gf-notify-title">${escapeHtml(f.title)}</span>
           </div>
         `).join("")}
-        <div class="gf-notify-hint">单击需要完成的流程前往该页面，然后请按<br/> <kbd>ALT</kbd> + <kbd>G</kbd> 开始页面流程引导</div>
+        <div class="gf-notify-hint">单击需要完成的流程前往该页面，然后请按<br/> <kbd>ALT</kbd> + <kbd>G</kbd> 开始页面流程引导。 如果页面不支持自动跳转，请自行前往。</div>
       </div>`;
     document.body.appendChild(container);
     flowNotificationEl = container;
@@ -1625,7 +2341,7 @@
         if (starturl) {
           // 归一化比较 startUrl 与当前页面 URL：
           // 若一致则无需跳转浏览器，直接启动该流程的页面引导
-          if (normalizeUrlForMatch(starturl) === normalizeUrlForMatch(window.location.href)) {
+          if (urlsMatchClient(starturl, window.location.href)) {
             removeFlowNotification();
             try {
               const data = await fetchGuideFromApi(getCleanPath(), flowId);

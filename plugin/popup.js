@@ -7,9 +7,9 @@ document.addEventListener("DOMContentLoaded", () => {
   const DEFAULT_URL = "api.skillcloud.cn";
 
   // 加载已有配置
-  chrome.storage.local.get(["apiBaseUrl"], (result) => {
-    if (result.apiBaseUrl) {
-      apiUrlInput.value = result.apiBaseUrl;
+  chrome.storage.local.get(["appguide_apiBaseUrl"], (result) => {
+    if (result.appguide_apiBaseUrl) {
+      apiUrlInput.value = result.appguide_apiBaseUrl;
     } else {
       apiUrlInput.value = DEFAULT_URL;
     }
@@ -31,7 +31,7 @@ document.addEventListener("DOMContentLoaded", () => {
       apiUrlInput.value = DEFAULT_URL;
     }
 
-    chrome.storage.local.set({ apiBaseUrl: url }, () => {
+    chrome.storage.local.set({ appguide_apiBaseUrl: url }, () => {
       statusDiv.style.display = "block";
       setTimeout(() => {
         statusDiv.style.display = "none";
