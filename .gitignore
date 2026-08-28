@@ -2,6 +2,7 @@ node_modules/
 build/
 dist/
 coverage/
+plugin/
 .playwright-mcp/
 .DS_Store
 *.log
