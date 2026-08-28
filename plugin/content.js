@@ -127,11 +127,15 @@
             startGuideFromResolved(resolved, state);
             return;
           }
-          // URL 不匹配 → 直接按继续引导处理
-//           console.log("[BusinessGuide] 当前 URL 与流程预期页面不匹配，直接继续引导");
+          // URL 不匹配 → 用户已经跳转到了其他页面，从当前步骤+1开始继续引导，
+          // 避免在错误的页面上重复展示用户可能已经完成的那一步
+//           console.log("[BusinessGuide] 当前 URL 与流程预期页面不匹配，从下一步开始继续引导");
           var resolved = resolvePageByIndex(state.cachedFlow, targetIdx);
           if (resolved) {
-            startGuideFromResolved(resolved, state);
+            var advancedState = Object.assign({}, state, {
+              globalStepNumber: (typeof state.globalStepNumber === "number" ? state.globalStepNumber : 0) + 1,
+            });
+            startGuideFromResolved(resolved, advancedState);
           } else {
             showToast("❌ 无法加载预期页面数据");
           }
@@ -1196,11 +1200,15 @@
           startGuideFromResolved(resolved, state);
           return;
         }
-        // URL 不匹配 → 直接按继续引导处理
-//         console.log("[BusinessGuide] 手动 Alt+G：当前 URL 与流程预期页面不匹配，直接继续引导");
+        // URL 不匹配 → 用户已经跳转到了其他页面，从当前步骤+1开始继续引导，
+        // 避免在错误的页面上重复展示用户可能已经完成的那一步
+//         console.log("[BusinessGuide] 手动 Alt+G：当前 URL 与流程预期页面不匹配，从下一步开始继续引导");
         var resolved = resolvePageByIndex(state.cachedFlow, targetIdx);
         if (resolved) {
-          startGuideFromResolved(resolved, state);
+          var advancedState = Object.assign({}, state, {
+            globalStepNumber: (typeof state.globalStepNumber === "number" ? state.globalStepNumber : 0) + 1,
+          });
+          startGuideFromResolved(resolved, advancedState);
         } else {
           showToast("❌ 无法加载预期页面数据");
         }
@@ -1277,10 +1285,18 @@
     };
 
     let startLocalIndex = 0;
+    // 如果存在恢复状态（用户之前中途离开过这个流程），则从保存的全局步骤号恢复到对应的本地步骤索引
     if (resumeState && typeof resumeState.globalStepNumber === "number") {
+      // globalStepNumber 是跨页面计数的全局步骤编号（从整个 flow 的第一页开始计数）
+      // globalStepOffset 是当前页面前所有页面的步骤总数（即当前页的起始偏移量）
+      // 计算公式：本页面的步骤索引 = 全局步骤号 - 当前页的偏移量 - 1（-1 因为 globalStepNumber 是 1-indexed）
       const idx = resumeState.globalStepNumber - data.globalStepOffset - 1;
+      // 验证计算出的本地索引在有效范围内（0 到步骤数-1）
       if (idx >= 0 && idx < activeGuide.steps.length) {
         startLocalIndex = idx;
+      } else if (idx >= activeGuide.steps.length && activeGuide.steps.length > 0) {
+        // 越界（比如 +1 之后超出了本页步骤数）→ 停留在本页最后一步，而不是回退到第一步
+        startLocalIndex = activeGuide.steps.length - 1;
       }
     }
 
@@ -2103,7 +2119,7 @@
       </div>
       <div class="guide-body">
         <h3 class="guide-step-title">
-          <span class="guide-step-num">步骤 ${globalNum}</span>
+          <span class="guide-step-num">STEP ${globalNum}</span>
           ${escapeHtml(step.title)}
         </h3>
         <p class="guide-step-desc">${escapeHtml(step.description)}</p>

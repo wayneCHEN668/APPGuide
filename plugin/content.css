@@ -34,6 +34,7 @@
   background: none !important;
   border: none !important;
   color: #64748b !important;
+  font-family: "Microsoft YaHei", "微软雅黑", sans-serif !important;
   font-size: 18px !important;
   cursor: pointer !important;
   line-height: 1 !important;
@@ -114,6 +115,7 @@
   border-radius: 6px !important;
   cursor: pointer !important;
   border: none !important;
+  font-family: "Microsoft YaHei", "微软雅黑", sans-serif !important;
   transition: all 0.15s ease !important;
 }
 
@@ -166,6 +168,7 @@
   border-radius: 8px !important;
   padding: 8px 10px !important;
   cursor: pointer !important;
+  font-family: "Microsoft YaHei", "微软雅黑", sans-serif !important;
   transition: all 0.15s ease !important;
 }
 
@@ -207,6 +210,7 @@
   border-radius: 4px;
   cursor: pointer;
   font-size: 13px;
+  font-family: "Microsoft YaHei", "微软雅黑", sans-serif;
 }
 
 .guide-mismatch-btn:hover {
@@ -226,6 +230,7 @@
   border-radius: 4px;
   cursor: pointer;
   font-size: 13px;
+  font-family: "Microsoft YaHei", "微软雅黑", sans-serif;
 }
 
 .guide-mismatch-btn-primary:hover {
@@ -280,6 +285,7 @@
   font-size: 12px;
   font-weight: 500;
   box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.3);
+  font-family: "Microsoft YaHei", "微软雅黑", sans-serif;
   opacity: 0;
   scale: 0.9;
   transition: opacity 0.3s ease, scale 0.3s cubic-bezier(0.18, 0.89, 0.32, 1.28);
@@ -300,6 +306,7 @@
   border: 1px solid rgba(59, 130, 246, 0.35) !important;
   border-radius: 14px !important;
   box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.6) !important;
+  font-family: "Microsoft YaHei", "微软雅黑", sans-serif !important;
   overflow: hidden;
   animation: guideDialogSlideUp 0.2s cubic-bezier(0.18, 0.89, 0.32, 1.28);
 }
@@ -347,6 +354,7 @@
   border-radius: 7px !important;
   cursor: pointer !important;
   border: none !important;
+  font-family: "Microsoft YaHei", "微软雅黑", sans-serif !important;
   transition: all 0.15s ease !important;
 }
 
@@ -435,6 +443,7 @@
   background: none;
   border: none;
   color: #94a3b8;
+  font-family: "Microsoft YaHei", "微软雅黑", sans-serif;
   font-size: 16px;
   line-height: 1;
   cursor: pointer;
