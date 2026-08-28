@@ -1133,6 +1133,53 @@
       .toLowerCase();
   }
 
+  // ------------------ 客户端 URL 匹配引擎（移植自 plugin/content.js）------------------
+  function parseUrlSafely(rawUrl) {
+    const withScheme = /^https?:\/\//i.test(rawUrl) ? rawUrl : `https://${rawUrl}`;
+    try {
+      return new URL(withScheme);
+    } catch {
+      return new URL("https://invalid.invalid");
+    }
+  }
+
+  function normalizeHost(rawUrl) {
+    try {
+      return parseUrlSafely(rawUrl).host.replace(/^www\./i, "").toLowerCase();
+    } catch {
+      return "";
+    }
+  }
+
+  function normalizePathSegments(rawUrl) {
+    try {
+      return parseUrlSafely(rawUrl).pathname.split("/").filter(Boolean);
+    } catch {
+      return rawUrl.split("/").filter(Boolean);
+    }
+  }
+
+  function looksLikeDynamicId(segment) {
+    if (!segment) return false;
+    if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(segment)) return true;
+    if (/^\d{6,}$/.test(segment)) return true;
+    if (segment.length >= 8 && /[a-zA-Z]/.test(segment) && /[0-9]/.test(segment)) return true;
+    return false;
+  }
+
+  function urlsMatchClient(rawUrlA, rawUrlB) {
+    if (normalizeHost(rawUrlA) !== normalizeHost(rawUrlB)) return false;
+    const segsA = normalizePathSegments(rawUrlA);
+    const segsB = normalizePathSegments(rawUrlB);
+    if (segsA.length !== segsB.length) return false;
+    for (let i = 0; i < segsA.length; i++) {
+      if (segsA[i] === segsB[i]) continue;
+      if (looksLikeDynamicId(segsA[i]) && looksLikeDynamicId(segsB[i])) continue;
+      return false;
+    }
+    return true;
+  }
+
   async function enableGuide() {
     const cleanPath = getCleanPath();
 //     console.log("[BusinessGuide-Review] 正在检测页面并获取 API 校验...", cleanPath);
@@ -1251,6 +1298,17 @@
         startLocalIndex = idx;
       } else {
         console.warn("[BusinessGuide-Review] startGuideFromResolved 恢复索引越界, idx=" + idx + ", stepsLen=" + activeGuide.steps.length);
+      }
+    }
+
+    // URL 不匹配：当前页面与流程预期页面对不上时，从恢复步的下一步开始引导（越界则停在本页最后一步）
+    if (resumeState && data.page && data.page.url && activeGuide.steps.length > 0 &&
+        !urlsMatchClient(data.page.url, window.location.href)) {
+      const bumped = Math.min(startLocalIndex + 1, activeGuide.steps.length - 1);
+      if (bumped !== startLocalIndex) {
+        console.log("[BusinessGuide-Review] 当前 URL 与流程预期页面不匹配，从当前步骤 +1 开始引导：" +
+          startLocalIndex + " → " + bumped);
+        startLocalIndex = bumped;
       }
     }
 
@@ -1774,9 +1832,9 @@ function renderGuideUI() {
     dialog.innerHTML = `
       <div class="guide-review-confirm-header">
         <div>
-          <p class="guide-review-confirm-title">未找到当前步骤对应的页面控件</p>
+          <p class="guide-review-confirm-title">请确认操作节点</p>
           <p class="guide-review-confirm-desc">
-            当前步骤 <span class="guide-review-confirm-step-name">"${escapeHtml(step.title)}"</span> 未能在页面中匹配到相关操作。
+            当前审核步骤 <span class="guide-review-confirm-step-name">"${escapeHtml(step.title)}"</span> 与页面流程节点未对齐。点击 下一步 可继续审核，点击 人工确认 可手动指定操作节点，点击 删除 可删除该审核步骤。
           </p>
         </div>
       </div>
@@ -1984,7 +2042,7 @@ function renderGuideUI() {
       </div>
       <div class="guide-review-body">
         <div class="guide-review-step-header">
-          <span class="guide-review-step-num">步骤 ${globalNum}</span>
+          <span class="guide-review-step-num">STEP ${globalNum}</span>
         </div>
         <input type="text" id="guide-review-input-title" class="guide-review-input-title" value="${escapeHtml(step.title)}" placeholder="步骤标题">
         <textarea id="guide-review-textarea-desc" class="guide-review-textarea-desc" placeholder="步骤描述">${escapeHtml(step.description)}</textarea>
@@ -2162,7 +2220,7 @@ function renderGuideUI() {
       if (!selector) {
         // 如果之前没存（极端情况），退回到用 generateStableSelector 在顶层文档里
         // 给这个 iframe 标签生成一个 selector —— 但这通常不对，因为目标在 iframe 内部
-        showToast("⚠️ iframe 内目标尚未完成 selector 生成，请稍后再试。");
+        showToast("请点击 修改定位 人工确认目标控件在页面中的位置是否正确，确认无误后继续。");
         return;
       }
     } else {
