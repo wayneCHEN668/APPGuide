@@ -501,7 +501,7 @@
     for (let i = 0; i < clean.length - 1; i++) {
       tokens.push(clean.substring(i, i + 2));
     }
-    const words = clean.split(/[^a-z0-9]+/i).filter(w => w.length > 0);
+    const words = clean.split(/[^a-z0-9一-鿿]+/i).filter(w => w.length > 1);
     tokens.push(...words);
     return tokens;
   }
