@@ -190,20 +190,27 @@ export const DevCenter: React.FC<DevCenterProps> = ({
       .replace(/(第\s*\d+\s*[步级])|流程|操作|设置|选择|找到|点击|按钮|输入|输入框|下拉框|区域|展开/g, "")
       .trim();
     
+    // Character n-grams are built from a whitespace-free copy: spaces carry no
+    // meaning but show up as high-frequency tokens that dilute real overlap.
+    const compact = clean.replace(/\s+/g, "");
+
     const tokens: string[] = [];
-    
+
     // 1. Character Unigrams (ideal for fine-grained Chinese character match)
-    for (let i = 0; i < clean.length; i++) {
-      tokens.push(clean[i]);
+    for (let i = 0; i < compact.length; i++) {
+      tokens.push(compact[i]);
     }
-    
+
     // 2. Character Bigrams (excellent for Chinese token structures)
-    for (let i = 0; i < clean.length - 1; i++) {
-      tokens.push(clean.substring(i, i + 2));
+    for (let i = 0; i < compact.length - 1; i++) {
+      tokens.push(compact.substring(i, i + 2));
     }
-    
-    // 3. English word tokens (split on non-alphanumeric and keep words)
-    const words = clean.split(/[^a-z0-9]+/i).filter(w => w.length > 0);
+
+    // 3. English word tokens (split on non-alphanumeric and keep words).
+    //    Only length>=2: a single digit/letter was already collected as a unigram
+    //    above, so keeping it here doubles its weight — the "1" in "测试专业1" would
+    //    outweigh every Chinese character, letting a bare <span>1</span> win.
+    const words = compact.split(/[^a-z0-9]+/i).filter(w => w.length > 1);
     tokens.push(...words);
     
     return tokens;

@@ -306,23 +306,27 @@
   function tokenize(text) {
     if (!text) return [];
     const clean = text.toLowerCase().trim();
-    
+    // 字符 n-gram 用无空白版本：空格本身不携带语义，却会作为高频 token 稀释真实重叠
+    const compact = clean.replace(/\s+/g, '');
+
     const tokens = [];
-    
+
     // 1. 中文字符一元组 (Unigrams)
-    for (let i = 0; i < clean.length; i++) {
-      tokens.push(clean[i]);
+    for (let i = 0; i < compact.length; i++) {
+      tokens.push(compact[i]);
     }
-    
+
     // 2. 中文字符二元组 (Bigrams)
-    for (let i = 0; i < clean.length - 1; i++) {
-      tokens.push(clean.substring(i, i + 2));
+    for (let i = 0; i < compact.length - 1; i++) {
+      tokens.push(compact.substring(i, i + 2));
     }
-    
-    // 3. 英文单词切分
-    const words = clean.split(/[^a-z0-9]+/i).filter(w => w.length > 0);
+
+    // 3. 英文单词切分。只收长度>=2的：单个数字/字母上面已经作为一元组收过一次，
+    //    再收一遍等于让它的权重翻倍——"测试专业1"里的"1"会比每个中文字重两倍，
+    //    页面上任何一个孤零零的 <span>1</span> 都能靠这一个 token 顶上高分。
+    const words = compact.split(/[^a-z0-9]+/i).filter(w => w.length > 1);
     tokens.push(...words);
-    
+
     return tokens;
   }
 
@@ -791,8 +795,21 @@
     var bestCandidates = [];
     var s3Top = [];
 
+    // 最小重叠护栏（照抄 S2 的 overlap>=2）：余弦对超短 label 极不稳——
+    // label 只有一两个字时它的向量模长极小，跟标题共享一个字符就能把分数顶过0.50，
+    // 页面上任何一个孤零零的 <span>1</span> 都能这样偷走"测试专业1"这一步。
+    // 用 continue 而不是事后过滤：被排除的候选也不该污染 secondBestScore，
+    // 否则下面 S3_MARGIN 的差距判断是拿合格候选去跟垃圾候选比。
+    var titleCharSet = new Set(stripSymbols(matchText).split(''));
+
     for (var i = 0; i < scanned.length; i++) {
       var item = scanned[i];
+      if (titleCharSet.size >= 2) {
+        var labelCharSet = new Set(stripSymbols(item.label + " " + item.ariaLabel).split(''));
+        var sharedChars = 0;
+        titleCharSet.forEach(function (c) { if (labelCharSet.has(c)) sharedChars++; });
+        if (sharedChars < 2) continue;
+      }
       var score = computeSimilarity(
         query,
         item.label + " " + item.label + " " + item.placeholder + " " + item.ariaLabel
