@@ -426,6 +426,54 @@ app.get("/api/flows/by-id", async (req, res) => {
 });
 
 // ============================================================
+// GET /api/flows/by-ocid?ocid=<OC课件ID>
+// 通过 OC 课件 ID 获取记录，返回全部字段；未找到则 404。
+// OC 课件 ID 存放在 subclass 列（生产库约定，与本地 api/flows/*.json 里
+// "子分类"语义的 subclass 不是一回事——所以 SKIP_DB 时不回退到文件，直接 503）。
+// subclass 上没有唯一约束，因此必须 ORDER BY + LIMIT 1，否则命中多行时
+// MySQL 返回哪一行是不确定的。updated_date 是 date（只有天粒度），同一天的
+// 多条记录光靠它分不出先后，所以再用 id 兜一层，保证结果完全确定。
+// 返回体字段与 /api/flows/by-id 保持一致，供插件复用同一套归一化逻辑。
+// ============================================================
+
+app.get("/api/flows/by-ocid", async (req, res) => {
+  try {
+    const ocid = typeof req.query.ocid === "string" ? req.query.ocid : "";
+    if (!ocid) {
+      res.status(400).json({ success: false, reason: "bad_request", message: "缺少 ocid 参数。" });
+      return;
+    }
+    if (SKIP_DB || !pool) {
+      res.status(503).json({ success: false, reason: "db_unavailable", message: "数据库未连接，按 OC 课件 ID 查询不可用。" });
+      return;
+    }
+    const [rows] = await pool.query(
+      "SELECT * FROM appguide WHERE subclass = ? ORDER BY updated_date DESC, id ASC LIMIT 1",
+      [ocid]
+    );
+    const row = (rows as any[])[0];
+    if (!row) {
+      res.status(404).json({ success: false, reason: "not_found", message: "未找到指定 OC 课件 ID 的记录。" });
+      return;
+    }
+    res.json({
+      success: true,
+      data: {
+        id: row.id,
+        class: row.class,
+        subclass: row.subclass,
+        starturl: row.starturl,
+        steps: typeof row.steps === "string" ? JSON.parse(row.steps) : row.steps,
+        updated_date: row.updated_date,
+      },
+    });
+  } catch (err) {
+    console.error("[guide_server] /api/flows/by-ocid 处理出错:", err);
+    res.status(500).json({ success: false, reason: "server_error", message: "服务端查询数据时出错。" });
+  }
+});
+
+// ============================================================
 // GET /api/flows/by-pattern?url=<cleanPath>
 // 去掉 url 中的疑似动态ID片段后，用剩余静态路径做 LIKE 粗筛，
 // 返回当前页面及子页面下所有匹配流程的 id / title / starturl。
@@ -500,6 +548,11 @@ app.get("/rest", async (req, res) => {
 
   if (method === "appguide.flows.byid") {
     req.url = `/api/flows/by-id?id=${req.query.id || ""}`;
+    return app.handle(req, res);
+  }
+
+  if (method === "appguide.flows.byocid") {
+    req.url = `/api/flows/by-ocid?ocid=${req.query.ocid || ""}`;
     return app.handle(req, res);
   }
 

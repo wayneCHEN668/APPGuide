@@ -96,11 +96,20 @@
       }
     });
 
-    // 监听来自后台 Service Worker 的全局 Chrome 命令
+    // 监听来自后台 Service Worker 的全局 Chrome 命令，
+    // 以及外部调用方（WebView2 宿主等）投递进来的启动指令。
     if (chrome.runtime && chrome.runtime.onMessage) {
-      chrome.runtime.onMessage.addListener((message) => {
+      chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         if (message.action === "toggle-guide") {
           toggleGuide();
+          return; // 不回包，不占用消息通道
+        }
+
+        // 按 OC 课件 ID 直接启动引导。异步取数据，必须 return true 保持通道，
+        // 且 startFlowByOcid 的每条路径都会 resolve 出结果，不会让调用方悬着。
+        if (message.action === "start-flow-by-ocid") {
+          startFlowByOcid(message.ocid).then(sendResponse);
+          return true;
         }
       });
     }
@@ -979,6 +988,42 @@
     });
   }
 
+  // 通过 /rest?method=appguide.flows.byocid 按 OC 课件 ID 获取完整 flow 数据。
+  // 与 fetchFlowById 不同，这里要把失败原因回给外部调用方（宿主要区分
+  // "服务连不上"和"这个课件没配引导"，两者给用户的提示完全不一样），
+  // 所以返回 { flow, reason }：成功时 reason 为 null。
+  function fetchFlowByOcid(ocid) {
+    return new Promise(function(resolve) {
+      try {
+        chrome.runtime.sendMessage(
+          { action: "fetch-flow-by-ocid", ocid: ocid },
+          function(response) {
+            if (chrome.runtime.lastError) {
+//               console.warn("[BusinessGuide] fetchFlowByOcid 通信失败:", chrome.runtime.lastError.message);
+              resolve({ flow: null, reason: "network_error" });
+              return;
+            }
+            if (!response || !response.success) {
+              // background 代理层就失败了：超时 / 网络不通
+//               console.warn("[BusinessGuide] fetchFlowByOcid 代理失败:", response && response.error);
+              resolve({ flow: null, reason: "network_error" });
+              return;
+            }
+            if (!response.data || !response.data.success) {
+              // 服务端正常应答，但没查到这个课件（404）
+              resolve({ flow: null, reason: "not_found" });
+              return;
+            }
+            resolve({ flow: normalizeFlowData(response.data.data), reason: null });
+          }
+        );
+      } catch (e) {
+//         console.warn("[BusinessGuide] fetchFlowByOcid 异常:", e.message);
+        resolve({ flow: null, reason: "network_error" });
+      }
+    });
+  }
+
   // 归一化 /api/flows/by-id 返回的原始数据为标准格式
   // rawData.steps 可能是：字符串(JSON)、数组(pages)、对象({pages:[],title:""})
   function normalizeFlowData(rawData) {
@@ -1241,6 +1286,50 @@
 //       console.error("[BusinessGuide] 无法连接到 API 配置端点:", e);
       showToast("❌ 业务指南网络服务端点连接失败");
     }
+  }
+
+  // 按 OC 课件 ID 启动引导——供外部调用方（WebView2 宿主等）通过 chrome.runtime 消息触发。
+  // 与 Alt+G 那条路径的根本区别：完全不做 URL 匹配，直接取出该课件绑定的完整流程，
+  // 从第一页第一步开始跑。页面是否已经导航到位由调用方自己负责。
+  // 返回 Promise<{success, ...}>，由上面的消息监听器 sendResponse 回给调用方。
+  async function startFlowByOcid(ocid) {
+    if (!ocid) {
+      return { success: false, reason: "bad_request" };
+    }
+
+    // 已有引导在跑时先彻底关掉：disableGuide 会清 UI、清存储的流程状态、
+    // 重置 usedElements，避免上一个流程的残留串进新流程。
+    if (isGuideActive) {
+      disableGuide();
+    }
+
+    const result = await fetchFlowByOcid(ocid);
+    if (!result.flow || !result.flow.pages || result.flow.pages.length === 0) {
+      const reason = result.reason || "not_found";
+      showToast(reason === "network_error"
+        ? "❌ 业务指南网络服务端点连接失败"
+        : "💡 该课件尚未配置引导流程");
+      return { success: false, reason: reason };
+    }
+
+    const resolved = resolvePageByIndex(result.flow, 0);
+    if (!resolved) {
+      showToast("❌ 引导步骤数据解析失败");
+      return { success: false, reason: "not_found" };
+    }
+
+    // 第二个参数只带 cachedFlow、不带 globalStepNumber：startGuideFromResolved 里
+    // 判断的是 typeof ... === "number"，缺这个字段起始步就固定落在第一步；
+    // 同时完整流程被直接种进缓存，跨页续接立刻可用，也省掉它末尾那次 fetchFlowById 回查。
+    startGuideFromResolved(resolved, { cachedFlow: result.flow });
+
+    return {
+      success: true,
+      flowId: resolved.flowId,
+      title: resolved.flowTitle,
+      totalPages: resolved.totalPages,
+      totalSteps: resolved.totalSteps,
+    };
   }
 
   // 统一处理 /api/guide 的四种返回结果：resume / new / choose / not_found(或其它失败)

@@ -8,6 +8,18 @@
 
 const FETCH_TIMEOUT_MS = 8000;
 
+const DEFAULT_BASE_URL = "https://api.skillcloud.cn";
+// 本机/内网调试端点仍走 http，其余一律 https
+const LOCAL_HOST_RE = /^(localhost|127\.0\.0\.1|\[::1\]|\d{1,3}(\.\d{1,3}){3})(:\d+)?$/i;
+
+// 归一化 API 基址：兼容用户输入与历史无协议存量值
+function normalizeBaseUrl(raw) {
+  const v = String(raw || "").trim().replace(/\/+$/, "");
+  if (!v) return DEFAULT_BASE_URL;
+  if (/^https?:\/\//i.test(v)) return v;
+  return `${LOCAL_HOST_RE.test(v) ? "http" : "https"}://${v}`;
+}
+
 function fetchWithTimeout(url, timeoutMs = FETCH_TIMEOUT_MS) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -34,8 +46,7 @@ chrome.commands.onCommand.addListener((command) => {
 // 代理 REST 请求：统一拼接 URL、超时控制、错误处理
 function proxyRestRequest(method, params, sendResponse) {
   chrome.storage.local.get(["appguide_apiBaseUrl"], (result) => {
-    const apiBaseUrl = result.appguide_apiBaseUrl || "api.skillcloud.cn";
-    const baseUrl = /^https?:\/\//i.test(apiBaseUrl) ? apiBaseUrl : `http://${apiBaseUrl}`;
+    const baseUrl = normalizeBaseUrl(result.appguide_apiBaseUrl);
     const qs = Object.entries(params)
       .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`)
       .join("&");
@@ -74,6 +85,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   if (message.action === "fetch-flow-by-id") {
     proxyRestRequest("appguide.flows.byid", { id: message.flowId || "" }, sendResponse);
+    return true;
+  }
+
+  if (message.action === "fetch-flow-by-ocid") {
+    proxyRestRequest("appguide.flows.byocid", { ocid: message.ocid || "" }, sendResponse);
     return true;
   }
 });
