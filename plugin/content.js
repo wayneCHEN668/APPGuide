@@ -2432,6 +2432,12 @@
 
   // ------------------ 可用流程浮动通知 ------------------
 
+  // 已审核标记：圆圈内对勾。stroke 用 currentColor，颜色交给 CSS 控制
+  var APPROVED_ICON_SVG =
+    '<svg class="gf-notify-approved" viewBox="0 0 24 24" fill="none" stroke="currentColor" ' +
+    'stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' +
+    '<circle cx="12" cy="12" r="9"></circle><polyline points="8 12.5 11 15.5 16 9.5"></polyline></svg>';
+
   function renderFlowNotification(flows) {
     if (flowNotificationEl) {
       flowNotificationEl.parentNode && flowNotificationEl.parentNode.removeChild(flowNotificationEl);
@@ -2453,6 +2459,7 @@
           <div class="gf-notify-item" data-flowid="${escapeHtml(f.id)}" data-starturl="${escapeHtml(f.starturl)}">
             <span class="gf-notify-index">${i + 1}.</span>
             <span class="gf-notify-title">${escapeHtml(f.title)}</span>
+            ${Number(f.approval) === 1 ? APPROVED_ICON_SVG : ""}
           </div>
         `).join("")}
         <div class="gf-notify-hint">单击需要完成的流程前往该页面，然后请按<br/> <kbd>ALT</kbd> + <kbd>G</kbd> 开始页面流程引导。 如果页面不支持自动跳转，请自行前往。</div>

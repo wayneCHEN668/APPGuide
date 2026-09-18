@@ -488,6 +488,12 @@
   overflow: hidden;
   text-overflow: ellipsis;
 }
+.gf-notify-approved {
+  flex-shrink: 0;
+  width: 14px;
+  height: 14px;
+  color: #4ade80;
+}
 .gf-notify-hint {
   position: sticky;
   bottom: 0;
