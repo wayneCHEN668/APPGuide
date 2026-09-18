@@ -9,15 +9,26 @@
 
 // ── 公共辅助函数 ──────────────────────────────────────────────────────────────
 
+const DEFAULT_BASE_URL = "https://api.skillcloud.cn";
+// 本机/内网调试端点仍走 http，其余一律 https（与 plugin/background.js 保持一致）
+const LOCAL_HOST_RE = /^(localhost|127\.0\.0\.1|\[::1\]|\d{1,3}(\.\d{1,3}){3})(:\d+)?$/i;
+
+// 归一化 API 基址：兼容用户输入与历史无协议存量值
+function normalizeBaseUrl(raw) {
+  const v = String(raw || "").trim().replace(/\/+$/, "");
+  if (!v) return DEFAULT_BASE_URL;
+  if (/^https?:\/\//i.test(v)) return v;
+  return `${LOCAL_HOST_RE.test(v) ? "http" : "https"}://${v}`;
+}
+
 /**
  * 从 chrome.storage 中读取并构造 API 根 URL。
- * @returns {Promise<string>} 形如 "http://api.skillcloud.cn" 的字符串
+ * @returns {Promise<string>} 例如 "https://api.skillcloud.cn" 或 "http://localhost:3010"
  */
 function buildBaseUrl() {
   return new Promise((resolve) => {
     chrome.storage.local.get(["apiBaseUrl"], (result) => {
-      const raw = result.apiBaseUrl || "api.skillcloud.cn";
-      resolve(/^https?:\/\//i.test(raw) ? raw : `http://${raw}`);
+      resolve(normalizeBaseUrl(result.apiBaseUrl));
     });
   });
 }

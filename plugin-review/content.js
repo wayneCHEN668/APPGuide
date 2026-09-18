@@ -2982,11 +2982,38 @@ function renderGuideUI() {
   // 可用流程浮动通知（同原版）
   // ================================================================
 
+  // 审核状态标记：已审核为圆圈内对勾，未审核为空心圆圈。
+  // stroke 用 currentColor，颜色交给 CSS 控制
+  var REVIEW_APPROVED_ICON_SVG =
+    '<svg class="gf-review-notify-approved" viewBox="0 0 24 24" fill="none" stroke="currentColor" ' +
+    'stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><title>已审核</title>' +
+    '<circle cx="12" cy="12" r="9"></circle><polyline points="8 12.5 11 15.5 16 9.5"></polyline></svg>';
+
+  var REVIEW_PENDING_ICON_SVG =
+    '<svg class="gf-review-notify-pending" viewBox="0 0 24 24" fill="none" stroke="currentColor" ' +
+    'stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><title>未审核</title>' +
+    '<circle cx="12" cy="12" r="9"></circle></svg>';
+
+  // 渲染单个 tab 下的流程条目；序号在每个 tab 内各自从 1 开始
+  function renderFlowNotifyItems(list, emptyText) {
+    if (!list.length) return `<div class="gf-review-notify-empty">${emptyText}</div>`;
+    return list.map((f, i) => `
+            <div class="gf-review-notify-item" data-flowid="${escapeHtml(f.id)}" data-starturl="${escapeHtml(f.starturl)}">
+              <span class="gf-review-notify-index">${i + 1}.</span>
+              <span class="gf-review-notify-title">${escapeHtml(f.title)}</span>
+              ${Number(f.approval) === 1 ? REVIEW_APPROVED_ICON_SVG : REVIEW_PENDING_ICON_SVG}
+            </div>
+          `).join("");
+  }
+
   function renderFlowNotification(flows) {
     if (flowNotificationEl) {
       flowNotificationEl.parentNode && flowNotificationEl.parentNode.removeChild(flowNotificationEl);
       flowNotificationEl = null;
     }
+    // approval 非 1 一律算待审核（可能为 0 / null / 字符串）
+    const approvedFlows = flows.filter(f => Number(f.approval) === 1);
+    const pendingFlows = flows.filter(f => Number(f.approval) !== 1);
     const container = document.createElement("div");
     container.className = "guide-review-extension-flow-notify";
     container.innerHTML =
@@ -2998,13 +3025,15 @@ function renderGuideUI() {
         </div>
       </div>
       <div class="gf-review-notify-body">
-        <div class="gf-review-notify-list">
-          ${flows.map((f, i) => `
-            <div class="gf-review-notify-item" data-flowid="${escapeHtml(f.id)}" data-starturl="${escapeHtml(f.starturl)}">
-              <span class="gf-review-notify-index">${i + 1}.</span>
-              <span class="gf-review-notify-title">${escapeHtml(f.title)}</span>
-            </div>
-          `).join("")}
+        <div class="gf-review-notify-tabs">
+          <button class="gf-review-notify-tab gf-review-tab-active" data-tab="pending">待审核(${pendingFlows.length})</button>
+          <button class="gf-review-notify-tab" data-tab="approved">已审核(${approvedFlows.length})</button>
+        </div>
+        <div class="gf-review-notify-list gf-review-tab-active" data-tab="pending">
+          ${renderFlowNotifyItems(pendingFlows, "暂无待审核流程")}
+        </div>
+        <div class="gf-review-notify-list" data-tab="approved">
+          ${renderFlowNotifyItems(approvedFlows, "暂无已审核流程")}
         </div>
         <div class="gf-review-notify-hint">单击需要审核的流程前往该页面，然后按<br/> <kbd>ALT</kbd> + <kbd>C</kbd> 开始审核。如果页面不支持自动跳转，请自行前往。</div>
       </div>`;
@@ -3060,6 +3089,19 @@ function renderGuideUI() {
     closeBtn.addEventListener("click", (e) => {
       e.stopPropagation();
       removeFlowNotification();
+    });
+
+    container.querySelectorAll(".gf-review-notify-tab").forEach(tabBtn => {
+      tabBtn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        const name = tabBtn.getAttribute("data-tab");
+        container.querySelectorAll(".gf-review-notify-tab").forEach(b => {
+          b.classList.toggle("gf-review-tab-active", b === tabBtn);
+        });
+        container.querySelectorAll(".gf-review-notify-list").forEach(l => {
+          l.classList.toggle("gf-review-tab-active", l.getAttribute("data-tab") === name);
+        });
+      });
     });
 
     container.querySelectorAll(".gf-review-notify-item").forEach(item => {

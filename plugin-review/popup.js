@@ -3,7 +3,7 @@ document.addEventListener("DOMContentLoaded", () => {
   const saveBtn = document.getElementById("saveBtn");
   const statusDiv = document.getElementById("status");
 
-  const DEFAULT_URL = "api.skillcloud.cn";
+  const DEFAULT_URL = "https://api.skillcloud.cn";
 
   chrome.storage.local.get(["apiBaseUrl"], (result) => {
     apiUrlInput.value = result.apiBaseUrl || DEFAULT_URL;
@@ -14,7 +14,6 @@ document.addEventListener("DOMContentLoaded", () => {
     if (url.endsWith("/")) {
       url = url.slice(0, -1);
     }
-    url = url.replace(/^https?:\/\//i, "");
 
     if (!url) {
       url = DEFAULT_URL;

@@ -691,9 +691,45 @@
 .gf-review-notify-body.gf-review-open {
   display: block;
 }
+.gf-review-notify-tabs {
+  display: flex;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  background: rgba(52, 28, 82, 0.4);
+}
+.gf-review-notify-tab {
+  flex: 1;
+  padding: 8px 0;
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: #94a3b8;
+  font-family: "Microsoft YaHei", "微软雅黑", sans-serif;
+  font-size: 12px;
+  cursor: pointer;
+  transition: color 0.15s, background 0.15s, border-color 0.15s;
+}
+.gf-review-notify-tab:hover {
+  color: #e2e8f0;
+  background: rgba(139, 92, 246, 0.12);
+}
+.gf-review-notify-tab.gf-review-tab-active {
+  color: #a78bfa;
+  border-bottom-color: #a78bfa;
+  background: rgba(139, 92, 246, 0.15);
+}
+.gf-review-notify-empty {
+  padding: 18px 14px;
+  text-align: center;
+  font-size: 12px;
+  color: #64748b;
+}
 .gf-review-notify-list {
   max-height: 400px;
   overflow-y: auto;
+  display: none;
+}
+.gf-review-notify-list.gf-review-tab-active {
+  display: block;
 }
 .gf-review-notify-item {
   display: flex;
@@ -715,6 +751,18 @@
 .gf-review-notify-title {
   flex: 1;
   font-size: 12px;
+}
+.gf-review-notify-approved {
+  flex-shrink: 0;
+  width: 14px;
+  height: 14px;
+  color: #a78bfa;
+}
+.gf-review-notify-pending {
+  flex-shrink: 0;
+  width: 14px;
+  height: 14px;
+  color: #64748b;
 }
 .gf-review-notify-hint {
   padding: 8px 14px 12px;
