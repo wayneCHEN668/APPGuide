@@ -36,6 +36,7 @@ interface FlowRecord {
   subclass?: string;
   title: string;
   starturl: string;
+  approval: 0 | 1;
   pages: RawPage[];
 }
 
@@ -63,12 +64,19 @@ const pool = SKIP_DB
       connectTimeout: 4000,
     });
 
+// approval 列：1=已审核，0/NULL/字段缺失=未审核。DB 可能回 number 也可能回 string，
+// 本地 api/flows/*.json 则根本没这一列，统一归一化成 0 | 1 再往外发。
+function toApproval(v: unknown): 0 | 1 {
+  return Number(v) === 1 ? 1 : 0;
+}
+
 function loadAllFlowsFromFiles(): FlowRecord[] {
   const flowsDir = path.resolve("api/flows");
   const files = fs.readdirSync(flowsDir).filter((f: string) => f.endsWith(".json"));
   return files.map((f: string) => {
     const raw = JSON.parse(fs.readFileSync(path.join(flowsDir, f), "utf-8"));
     if (!raw.id) raw.id = path.basename(f, ".json");
+    raw.approval = toApproval(raw.approval);
     return raw as FlowRecord;
   });
 }
@@ -77,7 +85,7 @@ async function loadFlowById(id: string): Promise<FlowRecord | null> {
   if (SKIP_DB || !pool) return null;
   try {
     const [rows] = await pool.query(
-      "SELECT id, class, subclass, starturl, steps FROM appguide WHERE id = ?",
+      "SELECT id, class, subclass, starturl, steps, approval FROM appguide WHERE id = ?",
       [id]
     );
     if ((rows as any[]).length === 0) return null;
@@ -89,6 +97,7 @@ async function loadFlowById(id: string): Promise<FlowRecord | null> {
       subclass: row.subclass || "",
       title: row.title || stepsData.title || "",
       starturl: row.starturl,
+      approval: toApproval(row.approval),
       pages: stepsData.pages || [],
     } as FlowRecord;
   } catch (err) {
@@ -106,7 +115,7 @@ async function loadFlowsByStarturl(rawUrl: string): Promise<FlowRecord[] | null>
     // 那层精确过滤（含动态ID识别）会正确排除掉。真正的"能不能算同一个页面"
     // 这种需要逐段判断的逻辑，SQL的LIKE做不了，只能在JS里做。
     const [rows] = await pool.query(
-      "SELECT id, class, subclass, title, starturl, steps FROM appguide WHERE starturl LIKE ?",
+      "SELECT id, class, subclass, title, starturl, steps, approval FROM appguide WHERE starturl LIKE ?",
       [`%${host}%`]
     );
     const flows = (rows as any[]).map((row) => {
@@ -117,6 +126,7 @@ async function loadFlowsByStarturl(rawUrl: string): Promise<FlowRecord[] | null>
         subclass: row.subclass || "",
         title: row.title || stepsData.title || "",
         starturl: row.starturl,
+        approval: toApproval(row.approval),
         pages: stepsData.pages || [],
       } as FlowRecord;
     });
@@ -208,6 +218,7 @@ function urlsMatch(rawUrlA: string, rawUrlB: string): boolean {
 interface ResolvedPage {
   flowId: string;
   flowTitle: string;
+  approval: 0 | 1;
   pageIndex: number;
   totalPages: number;
   globalStepOffset: number; // 该页第一步之前，已经过去的步数
@@ -251,6 +262,7 @@ function resolvePageInFlow(flow: FlowRecord, rawUrl: string): ResolvedPage | nul
   return {
     flowId: flow.id,
     flowTitle: flow.title,
+    approval: flow.approval,
     pageIndex,
     totalPages: flow.pages.length,
     globalStepOffset,
@@ -335,6 +347,7 @@ app.get("/api/guide", async (req, res) => {
           flowId: f.id,
           title: f.title,
           description: f.pages[0]?.description ?? "",
+          approval: f.approval,
         })),
       });
       return;
@@ -502,13 +515,13 @@ app.get("/api/flows/by-pattern", async (req, res) => {
       const matched = fileFlows.filter(f => f.starturl.includes(pattern));
       res.json({
         success: true,
-        data: matched.map(f => ({ id: f.id, title: f.title, starturl: f.starturl }))
+        data: matched.map(f => ({ id: f.id, title: f.title, starturl: f.starturl, approval: f.approval }))
       });
       return;
     }
 
     const [rows] = await pool.query(
-      "SELECT id, title, starturl, steps FROM appguide WHERE starturl LIKE ?",
+      "SELECT id, title, starturl, steps, approval FROM appguide WHERE starturl LIKE ?",
       [`%${pattern}%`]
     );
     const data = (rows as any[]).map(row => {
@@ -517,6 +530,7 @@ app.get("/api/flows/by-pattern", async (req, res) => {
         id: row.id,
         title: row.title || (stepsData && stepsData.title) || "",
         starturl: row.starturl,
+        approval: toApproval(row.approval),
       };
     });
     res.json({ success: true, data });
