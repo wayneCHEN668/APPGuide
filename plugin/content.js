@@ -173,7 +173,7 @@
       flowNotifyRequestToken++;
       const myToken = flowNotifyRequestToken;
       try {
-        const flows = await fetchFlowsByPattern(getCleanPath());
+        const flows = (await fetchFlowsByPattern(getCleanPath()) || []).filter(isApprovedFlow);
         if (myToken !== flowNotifyRequestToken) return; // 丢弃过期响应
         if (flows && flows.length > 0) {
 //           console.log("[BusinessGuide] 检测到", flows.length, "个可用引导流程");
@@ -1024,6 +1024,13 @@
     });
   }
 
+  // 审核门禁：只有 approval === 1 的流程允许出现在入口列表、允许启动与续接。
+  // by-pattern / guide / by-id / by-ocid 四个接口都会下发该字段；字段缺失（老服务端）
+  // 一律按未审核处理——门禁失效时宁可拦住，不能放行。
+  function isApprovedFlow(x) {
+    return !!x && Number(x.approval) === 1;
+  }
+
   // 归一化 /api/flows/by-id 返回的原始数据为标准格式
   // rawData.steps 可能是：字符串(JSON)、数组(pages)、对象({pages:[],title:""})
   function normalizeFlowData(rawData) {
@@ -1044,6 +1051,7 @@
       id: rawData.id,
       title: (stepsData && stepsData.title) || rawData.class || "",
       starturl: rawData.starturl || "",
+      approval: Number(rawData.approval) === 1 ? 1 : 0,
       pages: pages
     };
   }
@@ -1064,6 +1072,13 @@
             return;
           }
           if (Date.now() - state.lastActiveAt > FLOW_TTL_MS) {
+            try { chrome.storage.local.remove(FLOW_STATE_KEY); } catch (e) { /* 静默 */ }
+            resolve(null);
+            return;
+          }
+          // 审核门禁：缓存里的流程已不是“已审核”状态（被撤审或老数据），
+          // 连同存储一起作废，等同于没有进行中的流程。
+          if (state.cachedFlow && !isApprovedFlow(state.cachedFlow)) {
             try { chrome.storage.local.remove(FLOW_STATE_KEY); } catch (e) { /* 静默 */ }
             resolve(null);
             return;
@@ -1312,6 +1327,13 @@
       return { success: false, reason: reason };
     }
 
+    // 审核门禁：未通过审核的流程即使被课件显式绑定也不启动。否则它跨页时
+    // 会在 getFlowStateIfValid 那一层被拦下，走到一半突然中断，比一开始就拒绝更糟。
+    if (!isApprovedFlow(result.flow)) {
+      showToast("💡 该课件绑定的引导流程未通过审核，暂不可用");
+      return { success: false, reason: "not_approved" };
+    }
+
     const resolved = resolvePageByIndex(result.flow, 0);
     if (!resolved) {
       showToast("❌ 引导步骤数据解析失败");
@@ -1342,6 +1364,12 @@
     }
 
     if (data.success && data.mode === "resume") {
+      if (!isApprovedFlow(data)) {
+        // 续接目标已不可用：清掉状态，手动触发时才给提示，自动检测保持安静
+        clearFlowState();
+        if (manual) showToast("💡 该引导流程未通过审核，暂不可用");
+        return;
+      }
       startGuideFromResolved(data, state);
       return;
     }
@@ -1355,11 +1383,28 @@
     }
 
     if (data.success && data.mode === "new") {
+      if (!isApprovedFlow(data)) {
+        showToast("💡 当前页面没有已通过审核的引导流程");
+        return;
+      }
       startGuideFromResolved(data, null);
       return;
     }
     if (data.success && data.mode === "choose") {
-      renderCandidateChooser(data.candidates, cleanPath);
+      // 选单只列已审核的；过滤后只剩一条时没必要再让用户点一次，
+      // 直接按该 flowId 回查完整数据启动，等价于用户在选单里选中了它
+      var approved = (data.candidates || []).filter(isApprovedFlow);
+      if (approved.length === 0) {
+        showToast("💡 当前页面没有已通过审核的引导流程");
+        return;
+      }
+      if (approved.length === 1) {
+        fetchGuideFromApi(cleanPath, approved[0].flowId)
+          .then(function (d) { handleGuideApiResult(d, cleanPath, null, true); })
+          .catch(function () { showToast("❌ 具体业务指南获取失败"); });
+        return;
+      }
+      renderCandidateChooser(approved, cleanPath);
       return;
     }
     if (!data.success && data.reason === "not_found") {
@@ -2248,6 +2293,10 @@
     // 气泡同样按绝对页面坐标定位；anchor 元素（或承载目标的 iframe）在首屏外时先滚到可见位置。
     anchorElement.scrollIntoView({ block: "nearest", inline: "nearest", behavior: "instant" });
     positionBubble(anchorElement, step.tipPosition);
+
+    // 启用拖动：按住标题栏可拖动整个浮动窗口
+    var stepHeaderEl = bubbleElement.querySelector(".guide-header");
+    if (stepHeaderEl) makeDraggable(stepHeaderEl, bubbleElement);
   }
 
   function updateHighlightPosition(element) {
