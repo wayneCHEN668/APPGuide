@@ -1400,6 +1400,7 @@
     isGuideActive = false;
     activeGuide = null;
     flowMeta = null;
+    _fullFlowData = null;
     exitPickMode();
     cleanupUI();
     clearFlowState();
@@ -2701,104 +2702,67 @@ function renderGuideUI() {
 
   /** 删除当前步骤（skipConfirm 为 true 时跳过确认弹窗，用于「未找到控件」对话框的「删除步骤」按钮） */
   function deleteCurrentStep(skipConfirm = false) {
-    if (!activeGuide || !activeGuide.steps || activeGuide.steps.length === 0) return;
-
-    const globalNum = activeGuide.steps[currentStepIndex].globalStepNumber || (currentStepIndex + 1);
-    if (!skipConfirm && !confirm("确定要删除步骤 " + globalNum + " 吗？此操作不可撤销。")) return;
-
-    // 从当前活动步骤数组中移除
-    activeGuide.steps.splice(currentStepIndex, 1);
-
-    // 同步到完整流程数据
-    if (_fullFlowData && flowMeta && _fullFlowData.pages && _fullFlowData.pages[flowMeta.pageIndex]) {
-      const pageSteps = _fullFlowData.pages[flowMeta.pageIndex].steps;
-      if (pageSteps) {
-        pageSteps.splice(currentStepIndex, 1);
-      }
-      persistFlowData(_fullFlowData, flowMeta.pageIndex);
-    }
-
-    // 清除确认状态（定位确认也需要清掉）
-    currentStepConfirmed = false;
-    const stepKey = makeStepKey();
-    if (stepKey) delete reviewConfirmedCache[stepKey];
-
-    // 如果删完后当前页没有步骤了
-    if (activeGuide.steps.length === 0) {
-      showToast("当前页已无步骤，请按 Alt+C 继续或关闭。");
-      // 如果跨页还有后续页，尝试跳转
-      if (flowMeta && flowMeta.pageIndex < flowMeta.totalPages - 1) {
-        const nextPageIndex = flowMeta.pageIndex + 1;
-        // 重新计算 globalStepNumber
-        let newGlobalStepOffset = 0;
-        for (let i = 0; i < nextPageIndex; i++) {
-          const s = _fullFlowData && _fullFlowData.pages && _fullFlowData.pages[i] ? _fullFlowData.pages[i].steps : [];
-          newGlobalStepOffset += s.length;
-        }
-        persistFlowState(newGlobalStepOffset + 1, nextPageIndex);
-        isGuideActive = false;
-        activeGuide = null;
-        flowMeta = null;
-        cleanupUI();
-        showToast("本页已无步骤，请前往下一页按 Alt+C 继续审核。");
-      } else {
-        clearFlowState();
-        disableGuide();
-        showToast("审核流程已终止（所有步骤已删除）。");
-      }
+    if (!activeGuide || !activeGuide.steps || activeGuide.steps.length === 0 || !flowMeta) return;
+    // 完整流程数据是新流程启动后异步拉取的，未就绪时删除会丢失或误删
+    if (!_fullFlowData || !_fullFlowData.pages || !_fullFlowData.pages[flowMeta.pageIndex]) {
+      showToast("流程数据加载中，请稍后再删除。");
       return;
     }
 
-    // 如果删除的是最后一个步骤，回退一步
-    if (currentStepIndex >= activeGuide.steps.length) {
-      currentStepIndex = activeGuide.steps.length - 1;
-    }
+    const deletedIndex = currentStepIndex;
+    const wasLast = deletedIndex === activeGuide.steps.length - 1;
+    const isLastPageOfFlow = flowMeta.pageIndex >= flowMeta.totalPages - 1;
+    const globalNum = activeGuide.steps[deletedIndex].globalStepNumber || (deletedIndex + 1);
+    const confirmText = (wasLast && isLastPageOfFlow)
+      ? "确定要删除步骤 " + globalNum + " 吗？这是最后一步，删除后将完成审核并提交。"
+      : "确定要删除步骤 " + globalNum + " 吗？此操作不可撤销。";
+    if (!skipConfirm && !confirm(confirmText)) return;
 
-    // 重新计算步骤的全局编号
+    // 从当前活动步骤数组和完整流程数据中移除
+    activeGuide.steps.splice(deletedIndex, 1);
+    const pageSteps = _fullFlowData.pages[flowMeta.pageIndex].steps;
+    if (pageSteps) pageSteps.splice(deletedIndex, 1);
+    persistFlowData(_fullFlowData, flowMeta.pageIndex);
+
+    // 确认缓存按 pageIndex:index 记录，删除后本页后续步骤的键整体前移一位
+    currentStepConfirmed = false;
+    const shifted = {};
+    for (const key of Object.keys(reviewConfirmedCache)) {
+      const [p, i] = key.split(":").map(Number);
+      if (p !== flowMeta.pageIndex || i < deletedIndex) shifted[key] = reviewConfirmedCache[key];
+      else if (i > deletedIndex) shifted[`${p}:${i - 1}`] = reviewConfirmedCache[key];
+    }
+    reviewConfirmedCache = shifted;
+
     recalcGlobalStepNumbers();
-    // 更新流元信息的总步骤数
-    if (flowMeta && flowMeta.totalSteps) {
-      flowMeta.totalSteps = Math.max(0, flowMeta.totalSteps - 1);
+    trackFlowStat(flowMeta.flowId, "step");
+
+    // 删除的是本页最后一步（含本页已删空）→ 视为本页审核完成
+    if (wasLast) {
+      finishCurrentPage();
+      return;
     }
 
-    if (flowMeta) trackFlowStat(flowMeta.flowId, "step");
+    // currentStepIndex 不变，已指向原来的下一步
     renderGuideUI();
     if (!isGuideActive || !activeGuide) return;
     persistFlowState(activeGuide.steps[currentStepIndex].globalStepNumber);
   }
 
-  /** 重新计算当前页所有步骤的 globalStepNumber */
+  /** 根据完整流程数据重新计算当前页步骤的 globalStepNumber 及 flowMeta 的偏移量和总步骤数 */
   function recalcGlobalStepNumbers() {
-    if (!_fullFlowData || !_fullFlowData.pages) return;
-    let globalOffset = 0;
+    if (!_fullFlowData || !_fullFlowData.pages || !flowMeta) return;
+    let globalStepOffset = 0;
+    let totalSteps = 0;
     for (let i = 0; i < _fullFlowData.pages.length; i++) {
-      const page = _fullFlowData.pages[i];
-      const steps = page.steps || [];
-      if (i < (flowMeta ? flowMeta.pageIndex : 0)) {
-        globalOffset += steps.length;
-      }
-      for (let j = 0; j < steps.length; j++) {
-        steps[j].globalStepNumber = globalOffset + j + 1;
-      }
-      if (i === (flowMeta ? flowMeta.pageIndex : 0)) {
-        // 同步到 activeGuide.steps
-        if (activeGuide && activeGuide.steps) {
-          for (let j = 0; j < activeGuide.steps.length; j++) {
-            activeGuide.steps[j].globalStepNumber = globalOffset + j + 1;
-          }
-        }
-      }
-      globalOffset += steps.length;
+      const count = (_fullFlowData.pages[i].steps || []).length;
+      if (i < flowMeta.pageIndex) globalStepOffset += count;
+      totalSteps += count;
     }
-    // 更新 flowMeta 的总步骤数
-    if (flowMeta) {
-      flowMeta.totalSteps = globalOffset;
-      flowMeta.globalStepOffset = 0;
-      if (_fullFlowData.pages && flowMeta.pageIndex) {
-        for (let i = 0; i < flowMeta.pageIndex; i++) {
-          flowMeta.globalStepOffset += (_fullFlowData.pages[i].steps || []).length;
-        }
-      }
+    flowMeta.globalStepOffset = globalStepOffset;
+    flowMeta.totalSteps = totalSteps;
+    if (activeGuide && activeGuide.steps) {
+      activeGuide.steps.forEach((step, j) => { step.globalStepNumber = globalStepOffset + j + 1; });
     }
   }
 
@@ -2828,6 +2792,11 @@ function renderGuideUI() {
       return;
     }
 
+    finishCurrentPage();
+  }
+
+  /** 本页审核结束：最后一页则提交整个流程，否则保存进度并等待用户前往下一页 */
+  function finishCurrentPage() {
     const isLastPageOfFlow = !flowMeta || flowMeta.pageIndex >= flowMeta.totalPages - 1;
 
     if (isLastPageOfFlow) {
@@ -2838,9 +2807,10 @@ function renderGuideUI() {
       if (_fullFlowData) {
         persistFlowData(_fullFlowData, flowMeta.pageIndex);
       }
-      const lastGlobalNum = activeGuide.steps[currentStepIndex].globalStepNumber;
+      // 用 offset + 本页步数计算下一页首步编号（本页步骤被删空时同样成立）
+      const nextGlobalNum = flowMeta.globalStepOffset + activeGuide.steps.length + 1;
       const nextPageIndex = flowMeta.pageIndex + 1;
-      persistFlowState(lastGlobalNum + 1, nextPageIndex);
+      persistFlowState(nextGlobalNum, nextPageIndex);
       showToast("✅ 本页审核已完成，请前往下一步骤对应页面，按 Alt+C 继续审核。");
       isGuideActive = false;
       activeGuide = null;
@@ -2865,7 +2835,8 @@ function renderGuideUI() {
     var stepsObj = {
       title: _fullFlowData.title || "",
       startUrl: _fullFlowData.starturl || "",
-      pages: _fullFlowData.pages || [],
+      // 审核中被删空的页没有引导意义，提交时去掉
+      pages: (_fullFlowData.pages || []).filter(p => p.steps && p.steps.length > 0),
     };
     var stepsJson = JSON.stringify(stepsObj);
 
