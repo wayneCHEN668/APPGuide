@@ -281,10 +281,40 @@
   const ACTION_SELECTOR =
     "button, a[href], [role='button'], [role='link'], input[type='button'], input[type='submit'], input[type='reset'], input[type='image']";
 
+  // 文件上传：真实 file input 常被隐藏，审核时点到的多是触发按钮/拖拽区/label
+  const FILE_INPUT_SELECTOR = "input[type='file']";
+  // 上传组件的触发区容器（不含 .el-upload-list / .ant-upload-list 文件列表，那里的删除按钮不是上传）
+  const UPLOAD_WIDGET_SELECTOR = ".el-upload, .ant-upload";
+
+  /**
+   * 判定当前定位元素是否为文件上传控件：file input 本身、关联它的 label、
+   * Element Plus / antd 上传组件的触发区，或与隐藏 file input 同处一个小容器的自定义触发按钮。
+   * @param {Element} element - DOM 元素
+   * @returns {boolean}
+   */
+  function isFileUploadControl(element) {
+    try {
+      if (element.matches(FILE_INPUT_SELECTOR)) return true;
+      const label = element.closest("label");
+      if (label && label.control && label.control.matches(FILE_INPUT_SELECTOR)) return true;
+      const widget = element.closest(UPLOAD_WIDGET_SELECTOR);
+      if (widget && widget.querySelector(FILE_INPUT_SELECTOR)) return true;
+      // 自定义上传：向上最多 3 层，取第一个含 file input 的容器；
+      // 只有它仅含这一个取值控件、至多一个动作元素时才算（避免大表单里的提交按钮被误判）
+      for (let el = element, depth = 0; el && el !== document.body && depth <= 3; el = el.parentElement, depth++) {
+        if (!el.querySelector(FILE_INPUT_SELECTOR)) continue;
+        return el.querySelectorAll(VALUE_CONTROL_SELECTOR).length === 1 &&
+               el.querySelectorAll(ACTION_SELECTOR).length <= 1;
+      }
+    } catch (e) { /* 非法选择器等异常，按非上传处理 */ }
+    return false;
+  }
+
   /**
    * 识别当前操作元素的"控件类型"（input/select/radio/checkbox/button/a/ul 等）。
    * 很多框架（antd/Element Plus/MUI 等）渲染出来的真实标签/class 并不含这些语义关键词，
    * 因此按可靠程度分层判定，命中即返回：
+   *   0. 文件上传控件（含其触发按钮/拖拽区/label）→ fileupload
    *   1. 原生语义标签（input 再细分 type 属性）
    *   2. ARIA role（覆盖遵循无障碍规范但用 div 自定义渲染的框架组件）
    *   3. contenteditable（富文本编辑区）
@@ -297,6 +327,7 @@
     if (!element || !element.tagName) return "";
     const tag = element.tagName.toLowerCase();
 
+    if (isFileUploadControl(element)) return "fileupload";
     if (tag === "input") {
       const type = (element.getAttribute("type") || "text").toLowerCase();
       if (type === "checkbox") return "checkbox";
@@ -328,6 +359,7 @@
    * 判定当前定位元素是否为"参数项"（取值类控件：各类 input/select/radio/checkbox/switch/下拉选项等）。
    * 审核时定位到的往往不是控件本身，而是其父容器、组件内部的图标/文字，甚至控件的 label，
    * 因此按以下顺序判定，命中即返回：
+   *   0. 文件上传控件（含其触发按钮/拖拽区/label）→ true
    *   1. 动作类元素（按钮/链接）→ false
    *   2. 自身即取值控件或框架取值组件容器 → true
    *   3. 原生 <label> → 看其关联控件
@@ -340,6 +372,7 @@
   function detectParameters(element) {
     if (!element || !element.tagName) return false;
     try {
+      if (isFileUploadControl(element)) return true;
       if (element.matches(ACTION_SELECTOR)) return false;
 
       if (element.matches(VALUE_CONTROL_SELECTOR) || element.isContentEditable ||
