@@ -60,6 +60,8 @@
   let pickFromNotFound = false;
   // 当前步骤的审核状态缓存（key: `${pageIndex}:${stepIndex}`）
   let reviewConfirmedCache = {};
+  // 正在自动展开下拉框读取选项（期间忽略焦点自动流转）
+  let isReadingOptions = false;
 
   // iframe 内部取件模式的事件处理器引用（用于正确移除监听）
   let _iframePickMouseMove = null;
@@ -271,8 +273,8 @@
 
   // 框架取值组件的外层容器（内部 DOM 往往没有语义标签/role）
   const VALUE_WIDGET_SELECTOR = [
-    ".el-input", ".el-textarea", ".el-select", ".el-cascader", ".el-date-editor", ".el-input-number",
-    ".el-checkbox", ".el-radio", ".el-switch", ".el-slider", ".el-select-dropdown__item",
+    ".el-input", ".el-textarea", ".el-select", ".el-select-v2", ".el-cascader", ".el-date-editor", ".el-input-number",
+    ".el-checkbox", ".el-radio", ".el-switch", ".el-slider", ".el-select-dropdown__item", ".el-autocomplete",
     ".ant-input", ".ant-input-affix-wrapper", ".ant-select", ".ant-picker", ".ant-input-number",
     ".ant-checkbox-wrapper", ".ant-radio-wrapper", ".ant-switch", ".ant-select-item-option",
   ].join(", ");
@@ -285,6 +287,16 @@
   const FILE_INPUT_SELECTOR = "input[type='file']";
   // 上传组件的触发区容器（不含 .el-upload-list / .ant-upload-list 文件列表，那里的删除按钮不是上传）
   const UPLOAD_WIDGET_SELECTOR = ".el-upload, .ant-upload";
+
+  // 下拉选择组件根（含多选/级联；自动完成输入框不算，见 AUTOCOMPLETE_SELECTOR）
+  const SELECT_WIDGET_SELECTOR =
+    ".el-select, .el-select-v2, .el-cascader, .ant-select:not(.ant-select-auto-complete), .ant-cascader";
+  const AUTOCOMPLETE_SELECTOR = ".el-autocomplete, .ant-select-auto-complete";
+  // 这些组件内部还嵌着 .el-input 等容器，归并控件单元时优先取它们
+  const COMPOSITE_WIDGET_SELECTOR = SELECT_WIDGET_SELECTOR + ", " + AUTOCOMPLETE_SELECTOR;
+  const COMBOBOX_SELECTOR = "[role='combobox'], [role='listbox'], [aria-haspopup='listbox']";
+  // resolveValueControl 的特殊返回值：元素包裹了多个取值控件，是参数项但无法确定具体是哪一个
+  const MULTIPLE_CONTROLS = {};
 
   /**
    * 判定当前定位元素是否为文件上传控件：file input 本身、关联它的 label、
@@ -313,8 +325,29 @@
   /**
    * 识别当前操作元素的"控件类型"（input/select/radio/checkbox/button/a/ul 等）。
    * 很多框架（antd/Element Plus/MUI 等）渲染出来的真实标签/class 并不含这些语义关键词，
-   * 因此按可靠程度分层判定，命中即返回：
+   * 审核时定位到的往往不是控件本身（父容器、组件内部图标/文字、label），因此先按
+   * resolveValueControl（与 detectParameters 同一套解析）找到元素代表的取值控件再分类：
    *   0. 文件上传控件（含其触发按钮/拖拽区/label）→ fileupload
+   *   1. 代表单个取值控件：下拉选择 → select；框架容器取其内部原生控件分类；否则分类控件本身
+   *   2. 非取值控件 / 包裹多个取值控件 → 按元素自身分类（detectElementControlType）
+   * @param {Element} element - DOM 元素
+   * @returns {string} 控件类型
+   */
+  function detectControlType(element) {
+    if (!element || !element.tagName) return "";
+    if (isFileUploadControl(element)) return "fileupload";
+
+    const unit = resolveValueControl(element);
+    if (unit && unit !== MULTIPLE_CONTROLS) {
+      if (isSelectControl(unit)) return "select";
+      const inner = unit.matches(VALUE_WIDGET_SELECTOR) && unit.querySelector(VALUE_CONTROL_SELECTOR);
+      return detectElementControlType(inner || unit);
+    }
+    return detectElementControlType(element);
+  }
+
+  /**
+   * 按元素自身判定控件类型，命中即返回：
    *   1. 原生语义标签（input 再细分 type 属性）
    *   2. ARIA role（覆盖遵循无障碍规范但用 div 自定义渲染的框架组件）
    *   3. contenteditable（富文本编辑区）
@@ -323,11 +356,9 @@
    * @param {Element} element - DOM 元素
    * @returns {string} 控件类型
    */
-  function detectControlType(element) {
-    if (!element || !element.tagName) return "";
+  function detectElementControlType(element) {
     const tag = element.tagName.toLowerCase();
 
-    if (isFileUploadControl(element)) return "fileupload";
     if (tag === "input") {
       const type = (element.getAttribute("type") || "text").toLowerCase();
       if (type === "checkbox") return "checkbox";
@@ -371,37 +402,246 @@
    */
   function detectParameters(element) {
     if (!element || !element.tagName) return false;
+    return isFileUploadControl(element) || !!resolveValueControl(element);
+  }
+
+  /**
+   * 找出定位元素所代表的取值控件单元（detectParameters 的判定顺序，见其注释 1~6）。
+   * @param {Element} element - DOM 元素
+   * @returns {Element|object|null} 控件单元根；包裹多个控件时为 MULTIPLE_CONTROLS；非参数项为 null
+   */
+  function resolveValueControl(element) {
+    if (!element || !element.tagName) return null;
     try {
-      if (isFileUploadControl(element)) return true;
-      if (element.matches(ACTION_SELECTOR)) return false;
+      if (element.matches(ACTION_SELECTOR)) return null;
 
       if (element.matches(VALUE_CONTROL_SELECTOR) || element.isContentEditable ||
           element.matches(VALUE_WIDGET_SELECTOR)) {
-        return true;
+        return unitRoot(element);
       }
 
       if (element.tagName === "LABEL" && element.control) {
-        return element.control.matches(VALUE_CONTROL_SELECTOR);
+        return element.control.matches(VALUE_CONTROL_SELECTOR) ? unitRoot(element.control) : null;
       }
 
-      if (element.closest(VALUE_WIDGET_SELECTOR) || element.closest(VALUE_CONTROL_SELECTOR)) return true;
+      const inside = element.closest(VALUE_WIDGET_SELECTOR) || element.closest(VALUE_CONTROL_SELECTOR);
+      if (inside) return unitRoot(inside);
       const parentLabel = element.closest("label");
-      if (parentLabel && parentLabel.control && parentLabel.control.matches(VALUE_CONTROL_SELECTOR)) return true;
+      if (parentLabel && parentLabel.control && parentLabel.control.matches(VALUE_CONTROL_SELECTOR)) {
+        return unitRoot(parentLabel.control);
+      }
 
       const wrapsValueControl = (el) =>
         !!el.querySelector(VALUE_CONTROL_SELECTOR) && !el.querySelector(ACTION_SELECTOR);
-      if (wrapsValueControl(element)) return true;
+      if (wrapsValueControl(element)) return wrappedUnit(element);
 
       if (looksLikeLabelText(element)) {
         const formItem = element.closest(".el-form-item, .ant-form-item");
-        if (formItem) return !!formItem.querySelector(VALUE_CONTROL_SELECTOR);
+        if (formItem) return wrappedUnit(formItem);
         const next = element.nextElementSibling;
-        if (next && (next.matches(VALUE_CONTROL_SELECTOR) || next.matches(VALUE_WIDGET_SELECTOR) || wrapsValueControl(next))) {
-          return true;
-        }
+        if (next && (next.matches(VALUE_CONTROL_SELECTOR) || next.matches(VALUE_WIDGET_SELECTOR))) return unitRoot(next);
+        if (next && wrapsValueControl(next)) return wrappedUnit(next);
       }
     } catch (e) { /* 非法选择器等异常，按非参数项处理 */ }
-    return false;
+    return null;
+  }
+
+  // 控件单元根：下拉/自动完成组件优先（内部嵌着 .el-input 等），其次框架取值组件容器
+  function unitRoot(el) {
+    return el.closest(COMPOSITE_WIDGET_SELECTOR) || el.closest(VALUE_WIDGET_SELECTOR) || el;
+  }
+
+  // 容器内全部取值控件/组件归并到单元根后：恰好一个则返回它，多个返回 MULTIPLE_CONTROLS，没有返回 null
+  // （框架组件内部不一定有语义化控件，如非可搜索的 el-select，所以组件容器也要算上）
+  function wrappedUnit(container) {
+    const controls = container.querySelectorAll(VALUE_CONTROL_SELECTOR + ", " + VALUE_WIDGET_SELECTOR);
+    const roots = new Set(Array.from(controls, unitRoot));
+    if (roots.size === 0) return null;
+    return roots.size === 1 ? roots.values().next().value : MULTIPLE_CONTROLS;
+  }
+
+  /**
+   * 控件单元是否为下拉选择框：原生 select、Element/antd 下拉组件，或符合 ARIA 规范的
+   * combobox/listbox（排除可自由输入的自动完成框）。
+   * @param {Element} unit - resolveValueControl 返回的控件单元
+   * @returns {boolean}
+   */
+  function isSelectControl(unit) {
+    try {
+      if (unit.tagName === "SELECT" || unit.matches(SELECT_WIDGET_SELECTOR)) return true;
+      if (unit.closest(AUTOCOMPLETE_SELECTOR)) return false;
+      const combo = unit.matches(COMBOBOX_SELECTOR) ? unit : unit.querySelector(COMBOBOX_SELECTOR);
+      if (!combo) return false;
+      if (combo.getAttribute("role") === "listbox") return true;
+      const editable = combo.tagName === "INPUT" && !combo.readOnly &&
+        /^(list|both|inline)$/.test(combo.getAttribute("aria-autocomplete") || "");
+      return !editable;
+    } catch (e) { return false; }
+  }
+
+  // ---------------- 读取下拉选项 ----------------
+
+  // 虚拟列表（只渲染可见的十来项）：必须展开并滚动才能读全
+  const VIRTUAL_LIST_SELECTOR = ".rc-virtual-list, .el-vl__window";
+  const FRAMEWORK_POPUP_SELECTOR =
+    ".el-select__popper, .el-select-dropdown, .el-cascader__dropdown, .ant-select-dropdown, .ant-cascader-dropdown";
+  const POPUP_SELECTOR = FRAMEWORK_POPUP_SELECTOR + ", [role='listbox']";
+  const OPTION_ITEM_SELECTOR =
+    ".el-select-dropdown__item, .el-cascader-node, .ant-select-item-option, .ant-cascader-menu-item, [role='option']";
+  // 级联只取第一级菜单
+  const CASCADER_MENU_SELECTOR = ".el-cascader-menu, .ant-cascader-menu";
+  const SCROLL_HOLDER_SELECTOR = ".rc-virtual-list-holder, .el-vl__window, .el-select-dropdown__wrap, .el-scrollbar__wrap";
+  const SELECT_TRIGGER_SELECTOR = ".el-select__wrapper, .el-select-v2__wrapper, .el-input__wrapper, .ant-select-selector";
+
+  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+  // 每 50ms 检查一次 check()，返回其首个真值；超时返回最后一次结果
+  async function waitFor(check, timeoutMs) {
+    const end = Date.now() + timeoutMs;
+    for (;;) {
+      const v = check();
+      if (v || Date.now() >= end) return v;
+      await sleep(50);
+    }
+  }
+
+  function isShown(el) {
+    const r = el.getBoundingClientRect();
+    return r.width > 0 && r.height > 0;
+  }
+
+  // 收集选项文本（去重、保序）。onlyShown：展开状态下只取已渲染可见的项（排除 antd 的 0 尺寸无障碍列表）
+  function collectOptionTexts(scope, into, onlyShown) {
+    scope.querySelectorAll(OPTION_ITEM_SELECTOR).forEach((item) => {
+      if (onlyShown && !isShown(item)) return;
+      const text = (item.innerText || item.textContent || "").replace(/\s+/g, " ").trim();
+      if (text) into.add(text);
+    });
+    return into;
+  }
+
+  // 单元及其 combobox 上 aria-controls / aria-owns 指向的弹层
+  function referencedPopups(unit) {
+    const popups = [];
+    [unit, ...unit.querySelectorAll(COMBOBOX_SELECTOR)].forEach((el) => {
+      ["aria-controls", "aria-owns"].forEach((attr) => {
+        (el.getAttribute(attr) || "").split(/\s+/).filter(Boolean).forEach((id) => {
+          const ref = el.ownerDocument.getElementById(id);
+          if (ref) popups.push(ref.closest(FRAMEWORK_POPUP_SELECTOR) || ref);
+        });
+      });
+    });
+    return popups;
+  }
+
+  /**
+   * 读取下拉选择框的全部选项文本。先读 DOM 里已有的；读不到则模拟展开、滚动虚拟列表收集、再关闭。
+   * 只读不点选项，不改变控件取值。
+   * @param {Element} element - 定位元素（可以是下拉框的父容器/label 等，内部会先解析到控件单元）
+   * @returns {Promise<string[]|null>} 非下拉框或读取失败为 null
+   */
+  async function readSelectOptions(element) {
+    const unit = resolveValueControl(element);
+    if (!unit || unit === MULTIPLE_CONTROLS || !isSelectControl(unit)) return null;
+
+    if (unit.tagName === "SELECT") {
+      return Array.from(unit.options, (o) => o.text.trim()).filter(Boolean);
+    }
+
+    // 先读已在 DOM 里的下拉：Element Plus 下拉常驻 DOM（aria-controls 指向），Element UI 首次展开前在组件内部。
+    // antd 不走这里：它的下拉里还有一份 0 尺寸的无障碍列表，文本是 value 而非显示文本
+    if (!unit.matches(".ant-select")) {
+      const inner = unit.querySelector(".el-select-dropdown");
+      for (const popup of [...referencedPopups(unit), ...(inner ? [inner] : [])]) {
+        if (popup.querySelector(VIRTUAL_LIST_SELECTOR)) continue;
+        const texts = collectOptionTexts(popup.querySelector(CASCADER_MENU_SELECTOR) || popup, new Set(), false);
+        if (texts.size > 0) return [...texts];
+      }
+    }
+
+    return readOptionsByOpening(unit);
+  }
+
+  async function readOptionsByOpening(unit) {
+    const doc = unit.ownerDocument;
+    const before = new Set(Array.from(doc.querySelectorAll(POPUP_SELECTOR)).filter(isShown));
+    const findOpened = () =>
+      referencedPopups(unit).find(isShown) ||
+      Array.from(doc.querySelectorAll(POPUP_SELECTOR)).find((p) => isShown(p) && !before.has(p)) || null;
+    const trigger = unit.querySelector(SELECT_TRIGGER_SELECTOR) || unit.querySelector(COMBOBOX_SELECTOR) || unit;
+    const prevActive = doc.activeElement;
+    let popup = null;
+    let openEvents = null;
+
+    isReadingOptions = true;
+    try {
+      // antd 在 mousedown 展开，Element 在 click 展开；先 mousedown，没展开再 click，避免一开一关
+      for (const events of [["mousedown", "mouseup"], ["click"]]) {
+        dispatchMouse(trigger, events);
+        popup = await waitFor(findOpened, 400);
+        if (popup) { openEvents = events; break; }
+      }
+      if (!popup) return null;
+      await sleep(100); // 等展开动画/首屏渲染
+
+      const scope = popup.querySelector(CASCADER_MENU_SELECTOR) || popup;
+      const texts = collectOptionTexts(scope, new Set(), true);
+      const holder = findScrollHolder(scope);
+      if (holder) {
+        const origTop = holder.scrollTop;
+        for (let i = 0; i < 200; i++) {
+          const prevTop = holder.scrollTop;
+          if (prevTop + holder.clientHeight >= holder.scrollHeight - 1) break;
+          holder.scrollTop = prevTop + Math.max(holder.clientHeight * 0.8, 20);
+          if (holder.scrollTop === prevTop) break;
+          await sleep(60); // 虚拟列表在 scroll 事件后重新渲染
+          collectOptionTexts(scope, texts, true);
+        }
+        holder.scrollTop = origTop;
+      }
+      return texts.size > 0 ? [...texts] : null;
+    } finally {
+      if (popup) await closePopup(unit, popup, trigger, openEvents);
+      if (doc.activeElement !== prevActive) {
+        try {
+          if (doc.activeElement && doc.activeElement.blur) doc.activeElement.blur();
+          if (prevActive && prevActive.focus) prevActive.focus({ preventScroll: true });
+        } catch (e) { /* 忽略 */ }
+      }
+      isReadingOptions = false;
+    }
+  }
+
+  function findScrollHolder(scope) {
+    const known = scope.querySelector(SCROLL_HOLDER_SELECTOR);
+    if (known && known.scrollHeight > known.clientHeight + 1) return known;
+    return [scope, ...scope.querySelectorAll("*")].find((el) =>
+      el.scrollHeight > el.clientHeight + 1 && /(auto|scroll)/.test(getComputedStyle(el).overflowY)) || null;
+  }
+
+  function dispatchMouse(el, types) {
+    types.forEach((type) => {
+      el.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, composed: true, view: window, button: 0 }));
+    });
+  }
+
+  // 依次尝试：Esc → 再触发一次展开事件（切换）→ 点击页面空白处
+  async function closePopup(unit, popup, trigger, openEvents) {
+    // aria-expanded 在关闭时立即变 false，不受收起动画影响
+    const expandedEl = unit.matches("[aria-expanded]") ? unit : unit.querySelector("[aria-expanded]");
+    const closed = () => !popup.isConnected || !isShown(popup) ||
+      (!!expandedEl && expandedEl.getAttribute("aria-expanded") === "false");
+    const keyTarget = unit.querySelector("input") || trigger;
+    keyTarget.dispatchEvent(new KeyboardEvent("keydown", {
+      key: "Escape", code: "Escape", keyCode: 27, which: 27, bubbles: true, cancelable: true, composed: true,
+    }));
+    if (await waitFor(closed, 500)) return;
+    dispatchMouse(trigger, openEvents);
+    if (await waitFor(closed, 500)) return;
+    const body = unit.ownerDocument.body;
+    body.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, composed: true }));
+    dispatchMouse(body, ["mousedown", "mouseup", "click"]);
+    await waitFor(closed, 500);
   }
 
   // ================================================================
@@ -526,7 +766,7 @@
 
     // 监听页面元素焦点的捕获（自动流程流转）
     document.addEventListener("focus", (e) => {
-      if (!isGuideActive || !activeGuide) return;
+      if (!isGuideActive || !activeGuide || isReadingOptions) return;
       const step = activeGuide.steps[currentStepIndex];
       if (!step) return;
 
@@ -641,6 +881,24 @@
       if (data.type === "cancel-pick") {
 //         console.log("[BusinessGuide-Review][iframe] 取消取件模式");
         exitPickModeInIframe(true);
+      }
+
+      // 顶层确认定位为下拉框：在本文档内读取其选项
+      if (data.type === "read-options") {
+        let target = null;
+        try { target = data.selector ? document.querySelector(data.selector) : null; } catch (e) { /* 非法选择器 */ }
+        (target ? readSelectOptions(target) : Promise.resolve(null))
+          .catch(() => null)
+          .then((options) => {
+            try {
+              window.parent.postMessage({
+                __appguide_review: true, type: "read-options-result", requestId: data.requestId, options,
+              }, "*");
+            } catch (e) {
+              console.error("[BusinessGuide-Review][iframe] read-options 回复顶层失败:", e);
+            }
+          });
+        return;
       }
 
       // 顶层确认了 iframe 点选
@@ -2343,7 +2601,7 @@ function renderGuideUI() {
   /**
    * 记录当前步骤的审核定位结果（内存与缓存）
    */
-  function recordStepSelector(step, selector, controlType, frameSelector, parameters) {
+  function recordStepSelector(step, selector, controlType, frameSelector, parameters, options) {
     if (!step) return;
     currentStepConfirmed = true;
     const stepKey = makeStepKey();
@@ -2364,11 +2622,12 @@ function renderGuideUI() {
         controlType,
         frameSelector,
         parameters: !!parameters,
+        options,
         globalStepNumber: globalNum,
       });
     }
 
-    // 同步 selector/controlType/frameSelector/parameters 到完整流程数据
+    // 同步 selector/controlType/frameSelector/parameters/options 到完整流程数据
     if (_fullFlowData && flowMeta && _fullFlowData.pages && _fullFlowData.pages[flowMeta.pageIndex]) {
       var pageSteps = _fullFlowData.pages[flowMeta.pageIndex].steps;
       if (pageSteps && pageSteps[currentStepIndex]) {
@@ -2376,6 +2635,9 @@ function renderGuideUI() {
         pageSteps[currentStepIndex].controlType = controlType;
         pageSteps[currentStepIndex].frameSelector = frameSelector;
         pageSteps[currentStepIndex].parameters = !!parameters;
+        // 重新确认为非下拉框时清掉旧的 options
+        if (Array.isArray(options)) pageSteps[currentStepIndex].options = options;
+        else delete pageSteps[currentStepIndex].options;
       }
       persistFlowData(_fullFlowData, flowMeta.pageIndex);
     }
@@ -2384,7 +2646,7 @@ function renderGuideUI() {
   /**
    * 确认定位后统一更新 DOM 气泡面板上的按钮和文字状态
    */
-  function updateUIAfterConfirm(selector, controlType, frameSelector, parameters) {
+  function updateUIAfterConfirm(selector, controlType, frameSelector, parameters, options) {
     const confirmBtn = document.getElementById("guide-review-confirm-btn");
     if (confirmBtn) {
       confirmBtn.textContent = "✓ 定位正确";
@@ -2401,16 +2663,63 @@ function renderGuideUI() {
     }
     const display = document.getElementById("guide-review-selector-display");
     if (display) {
-      display.textContent = selector ? `获取定位成功 · 控件类型：${controlType || "未知"} · 参数项：${parameters ? "是" : "否"}${frameSelector ? " · 所属iframe：" + frameSelector : ""}` : "已确认，将使用语义检索";
+      const optionsText = controlType !== "select" ? ""
+        : Array.isArray(options) ? ` · 选项：${options.length} 项` : " · 选项读取失败";
+      display.textContent = selector ? `获取定位成功 · 控件类型：${controlType || "未知"}${optionsText} · 参数项：${parameters ? "是" : "否"}${frameSelector ? " · 所属iframe：" + frameSelector : ""}` : "已确认，将使用语义检索";
       display.classList.add("visible");
     }
+  }
+
+  /**
+   * 确认定位为下拉框时读取其全部选项；元素在 iframe 内则请求该 iframe 的 worker 在其文档里代读。
+   * @param {string} controlType
+   * @param {Element|null} element - 顶层文档内的定位元素
+   * @param {HTMLIFrameElement|null} iframeEl - 目标所在的 iframe（顶层元素时为 null）
+   * @param {string} selector - iframe 内目标的 selector
+   * @returns {Promise<string[]|null>}
+   */
+  function readStepOptions(controlType, element, iframeEl, selector) {
+    if (controlType !== "select") return Promise.resolve(null);
+    showToast("正在读取下拉选项…");
+    const confirmBtn = document.getElementById("guide-review-confirm-btn");
+    if (confirmBtn) confirmBtn.disabled = true;
+
+    if (!iframeEl) return readSelectOptions(element).catch(() => null);
+
+    return new Promise((resolve) => {
+      const requestId = "opt_" + Date.now() + "_" + Math.random().toString(36).slice(2);
+      let timer = null;
+      function finish(options) {
+        clearTimeout(timer);
+        window.removeEventListener("message", onMessage);
+        resolve(options);
+      }
+      function onMessage(event) {
+        const d = event.data;
+        if (!d || d.__appguide_review !== true || d.type !== "read-options-result" || d.requestId !== requestId) return;
+        if (event.source !== iframeEl.contentWindow) return;
+        finish(Array.isArray(d.options) ? d.options : null);
+      }
+      window.addEventListener("message", onMessage);
+      timer = setTimeout(() => finish(null), 5000);
+      try {
+        iframeEl.contentWindow.postMessage({ __appguide_review: true, type: "read-options", requestId, selector }, "*");
+      } catch (e) {
+        finish(null);
+      }
+    });
+  }
+
+  // 异步读取期间用户切步/关闭引导时，放弃记录
+  function isStillCurrentStep(step) {
+    return isGuideActive && !!activeGuide && activeGuide.steps[currentStepIndex] === step;
   }
 
   // ================================================================
   // 【阶段三】"定位正确" —— 记录当前 selector
   // ================================================================
 
-  function handleConfirmPosition(step) {
+  async function handleConfirmPosition(step) {
     if (!currentHighlightedElement) {
       showToast("⚠️ 未找到当前高亮元素，请先确保系统已定位到目标。");
       return;
@@ -2447,8 +2756,13 @@ function renderGuideUI() {
 //       console.log(`[BusinessGuide-Review] ⚠️ 步骤"${step.title}"无法生成稳定selector，将使用语义检索`);
     }
 
-    recordStepSelector(step, selector, controlType, frameSelector, parameters);
-    updateUIAfterConfirm(selector, controlType, frameSelector, parameters);
+    const isIframeTarget = currentHighlightedElement.tagName === "IFRAME";
+    const options = await readStepOptions(controlType,
+      isIframeTarget ? null : currentHighlightedElement, isIframeTarget ? currentHighlightedElement : null, selector);
+    if (!isStillCurrentStep(step)) return;
+
+    recordStepSelector(step, selector, controlType, frameSelector, parameters, options);
+    updateUIAfterConfirm(selector, controlType, frameSelector, parameters, options);
 
     // 高亮样式改为确认样式
     if (highlightElement) {
@@ -2642,7 +2956,7 @@ function renderGuideUI() {
       highlightElement.classList.add("guide-review-style-confirmed");
     }
 
-    pickConfirmEl.querySelector(".guide-review-pick-yes").onclick = (ev) => {
+    pickConfirmEl.querySelector(".guide-review-pick-yes").onclick = async (ev) => {
       ev.stopPropagation();
       // 用户确认选中
       const selector = generateStableSelector(target);
@@ -2665,7 +2979,9 @@ function renderGuideUI() {
       // 记录 selector（如果生成了稳定 selector；否则只确认步骤，后续走语义匹配）
       const step = activeGuide && activeGuide.steps[currentStepIndex];
       if (step) {
-        recordStepSelector(step, selector, controlType, frameSelector, parameters);
+        const options = await readStepOptions(controlType, target, null, selector);
+        if (!isStillCurrentStep(step)) return;
+        recordStepSelector(step, selector, controlType, frameSelector, parameters, options);
 
         // 如果是从"未找到元素"触发的人工确认，渲染当前步骤气泡让用户手动点"下一步"
         if (pickFromNotFound) {
@@ -2677,7 +2993,7 @@ function renderGuideUI() {
         }
 
         // 原地更新现有气泡（正常的"修改定位"流程）
-        updateUIAfterConfirm(selector, controlType, frameSelector, parameters);
+        updateUIAfterConfirm(selector, controlType, frameSelector, parameters, options);
         // 气泡重新定位到新选中的元素旁边
         positionBubble(target, step.tipPosition);
       }
@@ -3387,7 +3703,7 @@ function renderGuideUI() {
           pickHoverEl.style.display = "none";
         }
 
-        pickConfirmEl.querySelector(".guide-review-pick-yes").onclick = (ev) => {
+        pickConfirmEl.querySelector(".guide-review-pick-yes").onclick = async (ev) => {
           ev.stopPropagation();
           const p = window.__appguide_review_pending;
           delete window.__appguide_review_pending;
@@ -3399,7 +3715,10 @@ function renderGuideUI() {
           const frameSelector = generateStableSelector(p.iframeEl);
           const step = activeGuide && activeGuide.steps[currentStepIndex];
           if (step) {
-            recordStepSelector(step, p.selector, p.controlType, frameSelector, p.parameters);
+            // pick-approve 先于 read-options 送达，iframe 已退出取件模式，不会拦截展开下拉的事件
+            const options = await readStepOptions(p.controlType, null, p.iframeEl, p.selector);
+            if (!isStillCurrentStep(step)) return;
+            recordStepSelector(step, p.selector, p.controlType, frameSelector, p.parameters, options);
             p.iframeEl.__appguide_review_iframe_selector = p.selector;
             p.iframeEl.__appguide_review_iframe_controlType = p.controlType;
             p.iframeEl.__appguide_review_iframe_parameters = p.parameters;
@@ -3408,7 +3727,7 @@ function renderGuideUI() {
               pickFromNotFound = false;
               renderBubble(step, p.iframeEl);
             } else {
-              updateUIAfterConfirm(p.selector, p.controlType, frameSelector, p.parameters);
+              updateUIAfterConfirm(p.selector, p.controlType, frameSelector, p.parameters, options);
             }
           }
 //           console.log("[BusinessGuide-Review] ✅ iframe 点选确认:", p.selector);
