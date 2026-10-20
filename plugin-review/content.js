@@ -479,6 +479,65 @@
     } catch (e) { return false; }
   }
 
+  /**
+   * 找出定位元素背后真正承载交互的元素（写入 domlocator）。定位元素可能是控件本身，
+   * 也可能是其父容器、内部图标/文字或 label，按以下顺序判定，命中即返回：
+   *   0. 文件上传控件 → 真实的 input[type=file]（常被隐藏）
+   *   1. 取值控件单元：下拉 → combobox / 触发区；框架容器 → 内部原生控件；否则单元本身
+   *   2. 自身或祖先是动作元素（按钮/链接）→ 该动作元素
+   *   3. 容器内恰好一个动作元素 → 它
+   *   4. 非标准实现：向上至多 5 层，找交互 role、tabindex、onclick，或 cursor:pointer 的起点
+   *      （cursor 会继承，取自身为 pointer 而父元素不是的那一层）
+   * 包裹多个取值控件或无任何交互迹象时返回 null，不硬猜。
+   * @param {Element} element - DOM 元素
+   * @returns {Element|null}
+   */
+  function resolveInteractiveElement(element) {
+    if (!element || !element.tagName) return null;
+    try {
+      if (isFileUploadControl(element)) {
+        if (element.matches(FILE_INPUT_SELECTOR)) return element;
+        const label = element.closest("label");
+        if (label && label.control && label.control.matches(FILE_INPUT_SELECTOR)) return label.control;
+        const widget = element.closest(UPLOAD_WIDGET_SELECTOR);
+        const inWidget = widget && widget.querySelector(FILE_INPUT_SELECTOR);
+        if (inWidget) return inWidget;
+        for (let el = element, depth = 0; el && el !== document.body && depth <= 3; el = el.parentElement, depth++) {
+          const input = el.querySelector(FILE_INPUT_SELECTOR);
+          if (input) return input;
+        }
+        return null;
+      }
+
+      const unit = resolveValueControl(element);
+      if (unit === MULTIPLE_CONTROLS) return null;
+      if (unit) {
+        if (isSelectControl(unit)) {
+          return (unit.matches(COMBOBOX_SELECTOR) ? unit : unit.querySelector(COMBOBOX_SELECTOR)) ||
+                 unit.querySelector(SELECT_TRIGGER_SELECTOR) || unit;
+        }
+        if (unit.matches(VALUE_CONTROL_SELECTOR) || unit.isContentEditable) return unit;
+        return unit.querySelector(VALUE_CONTROL_SELECTOR) || unit;
+      }
+
+      const action = element.closest(ACTION_SELECTOR);
+      if (action) return action;
+      const actions = element.querySelectorAll(ACTION_SELECTOR);
+      if (actions.length === 1) return actions[0];
+
+      for (let el = element, depth = 0; el && el !== document.body && depth <= 5; el = el.parentElement, depth++) {
+        const role = (el.getAttribute("role") || "").toLowerCase();
+        if (role && ROLE_CONTROL_TYPE[role]) return el;
+        if (el.hasAttribute("tabindex") && el.getAttribute("tabindex") !== "-1") return el;
+        if (typeof el.onclick === "function" || el.hasAttribute("onclick")) return el;
+        const parent = el.parentElement;
+        if (getComputedStyle(el).cursor === "pointer" &&
+            (!parent || getComputedStyle(parent).cursor !== "pointer")) return el;
+      }
+    } catch (e) { /* 非法选择器等异常，按未识别处理 */ }
+    return null;
+  }
+
   // ---------------- 读取下拉选项 ----------------
 
   // 虚拟列表（只渲染可见的十来项）：必须展开并滚动才能读全
@@ -839,6 +898,7 @@
           const selector = generateStableSelector(local.element);
           const controlType = detectControlType(local.element);
           const parameters = detectParameters(local.element);
+          const domlocator = generateStableSelector(resolveInteractiveElement(local.element));
 //           console.log(`[BusinessGuide-Review][iframe] 本文档内找到匹配元素，已画高亮，selector="${selector}"，回复顶层 found:true`);
 
           try {
@@ -851,6 +911,7 @@
               selector: selector,  // ★ 新增：iframe 自己算好的 selector
               controlType: controlType,
               parameters: parameters,
+              domlocator: domlocator,
             }, "*");
           } catch (e) {
             console.error("[BusinessGuide-Review][iframe] 回复顶层失败:", e);
@@ -1938,6 +1999,7 @@
               currentHighlightedElement.__appguide_review_iframe_controlType = bestIframe.controlType;
             }
             currentHighlightedElement.__appguide_review_iframe_parameters = bestIframe.parameters;
+            currentHighlightedElement.__appguide_review_iframe_domlocator = bestIframe.domlocator || "";
             renderBubble(step, bestIframe.iframeEl);
           } else {
             // selector not found in any frame, fall through to Phase 1b (S0)
@@ -2044,6 +2106,7 @@
               currentHighlightedElement.__appguide_review_iframe_controlType = bestIframe.controlType;
             }
             currentHighlightedElement.__appguide_review_iframe_parameters = bestIframe.parameters;
+            currentHighlightedElement.__appguide_review_iframe_domlocator = bestIframe.domlocator || "";
             renderBubble(step, bestIframe.iframeEl);
           } else {
 //             console.log("[BusinessGuide-Review] 本地匹配(" + local.scorePercent + "%)优于或等于iframe，采用本地结果");
@@ -2088,6 +2151,7 @@
           currentHighlightedElement.__appguide_review_iframe_controlType = bestIframe.controlType;
         }
         currentHighlightedElement.__appguide_review_iframe_parameters = bestIframe.parameters;
+        currentHighlightedElement.__appguide_review_iframe_domlocator = bestIframe.domlocator || "";
         renderBubble(step, bestIframe.iframeEl);
       } else {
         handleTargetNotFound(step);
@@ -2234,9 +2298,10 @@ function renderGuideUI() {
         const selector = data.selector || ""; // ★ 阶段二：iframe 自己算好的 selector
         const controlType = data.controlType || "";
         const parameters = data.parameters === true;
+        const domlocator = data.domlocator || "";
 //         console.log(`[BusinessGuide-Review] iframe回复找到目标，置信度: ${score}%, selector: "${selector}"`);
         if (!bestResult || score > bestResult.score) {
-          bestResult = { iframeEl: matchedIframe, score, selector, controlType, parameters };
+          bestResult = { iframeEl: matchedIframe, score, selector, controlType, parameters, domlocator };
         }
       }
       window.addEventListener("message", onMessage);
@@ -2601,7 +2666,7 @@ function renderGuideUI() {
   /**
    * 记录当前步骤的审核定位结果（内存与缓存）
    */
-  function recordStepSelector(step, selector, controlType, frameSelector, parameters, options) {
+  function recordStepSelector(step, selector, controlType, frameSelector, parameters, options, domlocator) {
     if (!step) return;
     currentStepConfirmed = true;
     const stepKey = makeStepKey();
@@ -2623,11 +2688,12 @@ function renderGuideUI() {
         frameSelector,
         parameters: !!parameters,
         options,
+        domlocator: domlocator || "",
         globalStepNumber: globalNum,
       });
     }
 
-    // 同步 selector/controlType/frameSelector/parameters/options 到完整流程数据
+    // 同步 selector/controlType/frameSelector/parameters/options/domlocator 到完整流程数据
     if (_fullFlowData && flowMeta && _fullFlowData.pages && _fullFlowData.pages[flowMeta.pageIndex]) {
       var pageSteps = _fullFlowData.pages[flowMeta.pageIndex].steps;
       if (pageSteps && pageSteps[currentStepIndex]) {
@@ -2635,6 +2701,7 @@ function renderGuideUI() {
         pageSteps[currentStepIndex].controlType = controlType;
         pageSteps[currentStepIndex].frameSelector = frameSelector;
         pageSteps[currentStepIndex].parameters = !!parameters;
+        pageSteps[currentStepIndex].domlocator = domlocator || "";
         // 重新确认为非下拉框时清掉旧的 options
         if (Array.isArray(options)) pageSteps[currentStepIndex].options = options;
         else delete pageSteps[currentStepIndex].options;
@@ -2646,7 +2713,7 @@ function renderGuideUI() {
   /**
    * 确认定位后统一更新 DOM 气泡面板上的按钮和文字状态
    */
-  function updateUIAfterConfirm(selector, controlType, frameSelector, parameters, options) {
+  function updateUIAfterConfirm(selector, controlType, frameSelector, parameters, options, domlocator) {
     const confirmBtn = document.getElementById("guide-review-confirm-btn");
     if (confirmBtn) {
       confirmBtn.textContent = "✓ 定位正确";
@@ -2665,7 +2732,8 @@ function renderGuideUI() {
     if (display) {
       const optionsText = controlType !== "select" ? ""
         : Array.isArray(options) ? ` · 选项：${options.length} 项` : " · 选项读取失败";
-      display.textContent = selector ? `获取定位成功 · 控件类型：${controlType || "未知"}${optionsText} · 参数项：${parameters ? "是" : "否"}${frameSelector ? " · 所属iframe：" + frameSelector : ""}` : "已确认，将使用语义检索";
+      const domText = !domlocator ? "未识别" : domlocator === selector ? "同定位元素" : domlocator;
+      display.textContent = selector ? `获取定位成功 · 控件类型：${controlType || "未知"}${optionsText} · 参数项：${parameters ? "是" : "否"} · 交互元素：${domText}${frameSelector ? " · 所属iframe：" + frameSelector : ""}` : "已确认，将使用语义检索";
       display.classList.add("visible");
     }
   }
@@ -2729,6 +2797,7 @@ function renderGuideUI() {
     let controlType = "";
     let frameSelector = "";
     let parameters = false;
+    let domlocator = "";
 
     // 如果高亮元素是一个 <iframe>（说明目标在 iframe 里），
     // selector 应该用 iframe worker 之前回传的那个（存哪了？）
@@ -2743,12 +2812,14 @@ function renderGuideUI() {
       }
       controlType = currentHighlightedElement.__appguide_review_iframe_controlType || "";
       parameters = currentHighlightedElement.__appguide_review_iframe_parameters === true;
+      domlocator = currentHighlightedElement.__appguide_review_iframe_domlocator || "";
       // currentHighlightedElement 此时就是那个 <iframe> 标签本身，直接生成它在顶层文档里的 selector
       frameSelector = generateStableSelector(currentHighlightedElement);
     } else {
       selector = generateStableSelector(currentHighlightedElement);
       controlType = detectControlType(currentHighlightedElement);
       parameters = detectParameters(currentHighlightedElement);
+      domlocator = generateStableSelector(resolveInteractiveElement(currentHighlightedElement));
     }
 
     if (!selector) {
@@ -2761,8 +2832,8 @@ function renderGuideUI() {
       isIframeTarget ? null : currentHighlightedElement, isIframeTarget ? currentHighlightedElement : null, selector);
     if (!isStillCurrentStep(step)) return;
 
-    recordStepSelector(step, selector, controlType, frameSelector, parameters, options);
-    updateUIAfterConfirm(selector, controlType, frameSelector, parameters, options);
+    recordStepSelector(step, selector, controlType, frameSelector, parameters, options, domlocator);
+    updateUIAfterConfirm(selector, controlType, frameSelector, parameters, options, domlocator);
 
     // 高亮样式改为确认样式
     if (highlightElement) {
@@ -2962,6 +3033,7 @@ function renderGuideUI() {
       const selector = generateStableSelector(target);
       const controlType = detectControlType(target);
       const parameters = detectParameters(target);
+      const domlocator = generateStableSelector(resolveInteractiveElement(target));
       // 理论上这里的 target 不会是 <iframe>（iframe 内部点击走的是 _iframePickClick + 消息中转），
       // 防御性地按同样逻辑处理，与 handleConfirmPosition 保持一致
       const frameSelector = target.tagName === "IFRAME" ? generateStableSelector(target) : "";
@@ -2981,7 +3053,7 @@ function renderGuideUI() {
       if (step) {
         const options = await readStepOptions(controlType, target, null, selector);
         if (!isStillCurrentStep(step)) return;
-        recordStepSelector(step, selector, controlType, frameSelector, parameters, options);
+        recordStepSelector(step, selector, controlType, frameSelector, parameters, options, domlocator);
 
         // 如果是从"未找到元素"触发的人工确认，渲染当前步骤气泡让用户手动点"下一步"
         if (pickFromNotFound) {
@@ -2993,7 +3065,7 @@ function renderGuideUI() {
         }
 
         // 原地更新现有气泡（正常的"修改定位"流程）
-        updateUIAfterConfirm(selector, controlType, frameSelector, parameters, options);
+        updateUIAfterConfirm(selector, controlType, frameSelector, parameters, options, domlocator);
         // 气泡重新定位到新选中的元素旁边
         positionBubble(target, step.tipPosition);
       }
@@ -3085,6 +3157,7 @@ function renderGuideUI() {
       const selector = generateStableSelector(target);
       const controlType = detectControlType(target);
       const parameters = detectParameters(target);
+      const domlocator = generateStableSelector(resolveInteractiveElement(target));
       const rect = target.getBoundingClientRect();
 //       console.log(`[BusinessGuide-Review][iframe] 用户选中元素，selector="${selector}"，等待顶层确认`);
 
@@ -3108,6 +3181,7 @@ function renderGuideUI() {
           selector: selector,
           controlType: controlType,
           parameters: parameters,
+          domlocator: domlocator,
           rect: { top: rect.top, left: rect.left, width: rect.width, height: rect.height },
         }, "*");
       } catch (err) {
@@ -3678,7 +3752,7 @@ function renderGuideUI() {
 
         window.__appguide_review_pending = {
           iframeEl, selector: data.selector, controlType: data.controlType,
-          parameters: data.parameters === true, requestId: data.requestId
+          parameters: data.parameters === true, domlocator: data.domlocator || "", requestId: data.requestId
         };
 
         if (pickConfirmEl && pickConfirmEl.parentNode)
@@ -3718,16 +3792,17 @@ function renderGuideUI() {
             // pick-approve 先于 read-options 送达，iframe 已退出取件模式，不会拦截展开下拉的事件
             const options = await readStepOptions(p.controlType, null, p.iframeEl, p.selector);
             if (!isStillCurrentStep(step)) return;
-            recordStepSelector(step, p.selector, p.controlType, frameSelector, p.parameters, options);
+            recordStepSelector(step, p.selector, p.controlType, frameSelector, p.parameters, options, p.domlocator);
             p.iframeEl.__appguide_review_iframe_selector = p.selector;
             p.iframeEl.__appguide_review_iframe_controlType = p.controlType;
             p.iframeEl.__appguide_review_iframe_parameters = p.parameters;
+            p.iframeEl.__appguide_review_iframe_domlocator = p.domlocator;
             currentHighlightedElement = p.iframeEl;
             if (pickFromNotFound) {
               pickFromNotFound = false;
               renderBubble(step, p.iframeEl);
             } else {
-              updateUIAfterConfirm(p.selector, p.controlType, frameSelector, p.parameters, options);
+              updateUIAfterConfirm(p.selector, p.controlType, frameSelector, p.parameters, options, p.domlocator);
             }
           }
 //           console.log("[BusinessGuide-Review] ✅ iframe 点选确认:", p.selector);
