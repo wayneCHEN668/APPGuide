@@ -19,6 +19,12 @@ const RESERVED_STRINGS = [
   'toggle-guide',
   'fetch-guide',
   'apiBaseUrl',
+  // RPA 桥的 message action：background ↔ content 靠这些字面量对齐，必须保留原文
+  'rpa-spec',
+  'rpa-run',
+  'rpa-status',
+  'rpa-artifact',
+  'rpa-asset',
 ];
 
 // ── 混淆器配置（中等强度） ──

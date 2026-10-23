@@ -2487,7 +2487,18 @@
     'stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' +
     '<circle cx="12" cy="12" r="9"></circle><polyline points="8 12.5 11 15.5 16 9.5"></polyline></svg>';
 
+  // RPA 图标：仅 approval===1 且 rpa.ready===true 的行才渲染。
+  // 点它会弹「RPA 执行」弹层，必须 stopPropagation，否则会触发整行的跳转/启动引导。
+  var RPA_ICON_SVG =
+    '<svg class="gf-notify-rpa" viewBox="0 0 24 24" fill="none" stroke="currentColor" ' +
+    'stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' +
+    '<title>用 RPA 自动执行该流程</title>' +
+    '<rect x="4" y="8" width="16" height="12" rx="2"></rect>' +
+    '<path d="M12 8V5"></path><circle cx="12" cy="4" r="1"></circle>' +
+    '<path d="M9 13h.01M15 13h.01M9 16h6"></path></svg>';
+
   function renderFlowNotification(flows) {
+    closeRpaModal();
     if (flowNotificationEl) {
       flowNotificationEl.parentNode && flowNotificationEl.parentNode.removeChild(flowNotificationEl);
       flowNotificationEl = null;
@@ -2509,6 +2520,7 @@
             <span class="gf-notify-index">${i + 1}.</span>
             <span class="gf-notify-title">${escapeHtml(f.title)}</span>
             ${Number(f.approval) === 1 ? APPROVED_ICON_SVG : ""}
+            ${(Number(f.approval) === 1 && f.rpa && f.rpa.ready) ? RPA_ICON_SVG : ""}
           </div>
         `).join("")}
         <div class="gf-notify-hint">单击需要完成的流程前往该页面，然后请按<br/> <kbd>ALT</kbd> + <kbd>G</kbd> 开始页面流程引导。 如果页面不支持自动跳转，请自行前往。</div>
@@ -2582,7 +2594,17 @@
       removeFlowNotification();
     });
 
-    list.querySelectorAll(".gf-notify-item").forEach(item => {
+    list.querySelectorAll(".gf-notify-item").forEach((item, idx) => {
+      // RPA 图标：仅 approval===1 && rpa.ready 的行才有；点它不能触发整行的
+      // 「跳转 / 启动引导」，所以必须 stopPropagation。
+      const rpaBtn = item.querySelector(".gf-notify-rpa");
+      if (rpaBtn && flows[idx]) {
+        rpaBtn.addEventListener("click", (e) => {
+          e.stopPropagation();
+          e.preventDefault();
+          openRpaModal(flows[idx]);
+        });
+      }
       item.addEventListener("click", async () => {
         const starturl = item.getAttribute("data-starturl");
         const flowId = item.getAttribute("data-flowid");
@@ -2612,6 +2634,7 @@
   }
 
   function removeFlowNotification() {
+    closeRpaModal();
     if (flowNotificationEl && flowNotificationEl.parentNode) {
       flowNotificationEl.parentNode.removeChild(flowNotificationEl);
       flowNotificationEl = null;
@@ -2627,10 +2650,11 @@
     if (arrow) arrow.textContent = "▾";
   }
 
+  // innerHTML 只转义 & < >，引号要自己补，否则拼进 attr="..." 会被截断
   function escapeHtml(str) {
     const div = document.createElement("div");
     div.textContent = str;
-    return div.innerHTML;
+    return div.innerHTML.replace(/"/g, "&quot;").replace(/'/g, "&#39;");
   }
 
   // 向后台发送流程统计（fire-and-forget，不阻塞主流程）
@@ -2641,6 +2665,660 @@
       });
     } catch (e) {
       // 静默忽略
+    }
+  }
+
+  // ==================== RPA 执行弹层 ====================
+  // 入口：可用流程列表里 rpa.ready && approval===1 的行内 Bot 图标。
+  // 点击 → 拉参数清单(appguide.rpa.spec) → 填表 → 执行(appguide.rpa.run，固定 write_keep)
+  //       → 3s 轮询(appguide.rpa.status) → 结果区看步骤 / 录像 / 截图 / 报告。
+  // 所有 RPA 调用都经 background 代理到智导服务端；插件永远拿不到 RPA 令牌/地址。
+
+  var rpaModalEl = null;    // 当前打开的弹层 DOM（null = 已关闭）
+  var rpaModalState = null; // { mask, flow, spec, hasCredential }
+  // 正在跑/刚跑完的那次运行：**独立于弹层存活** —— 关掉弹层后轮询继续，
+  // 跑完时若弹层没开就弹浮动通知。用户执行后可以放心去干别的。
+  var rpaRun = null;        // { flow, runId, deadline, timer, status, detail, done }
+  var rpaNoticeEl = null;   // 弹层关闭后运行结束的浮动通知
+
+  function bgRequest(action, payload) {
+    return new Promise(function (resolve) {
+      try {
+        chrome.runtime.sendMessage(Object.assign({ action: action }, payload || {}), function (resp) {
+          if (chrome.runtime.lastError) return resolve({ success: false, error: chrome.runtime.lastError.message });
+          resolve(resp || { success: false, error: "空响应" });
+        });
+      } catch (e) {
+        resolve({ success: false, error: e.message });
+      }
+    });
+  }
+
+  // 下面三个都返回智导服务端信封：{ success:true, data } 或 { success:false, reason, message }
+  async function rpaSpecRequest(appguideId) {
+    var r = await bgRequest("rpa-spec", { appguideId: appguideId });
+    if (!r.success) return { success: false, reason: "transport", message: r.error || "网络错误" };
+    return r.data || { success: false, reason: "transport", message: "空响应" };
+  }
+  async function rpaRunRequest(body) {
+    var r = await bgRequest("rpa-run", { body: body });
+    if (!r.success) return { success: false, reason: "transport", message: r.error || "网络错误" };
+    return r.data || { success: false, reason: "transport", message: "空响应" };
+  }
+  async function rpaStatusRequest(runId) {
+    var r = await bgRequest("rpa-status", { runId: runId });
+    if (!r.success) return { success: false, reason: "transport", message: r.error || "网络错误" };
+    return r.data || { success: false, reason: "transport", message: "空响应" };
+  }
+  async function rpaArtifactRequest(runId, name) {
+    var r = await bgRequest("rpa-artifact", { runId: runId, name: name });
+    if (!r.success) throw new Error(r.error || "产物下载失败");
+    return r.data; // { contentType, base64 }
+  }
+
+  // 文件参数：消息通道只能传 JSON，文件以 base64 交给 background 上传。
+  // 上限与 guide_server POST /rest 的 express.raw limit 一致（base64 膨胀后仍远低于 Chrome 消息上限）
+  var RPA_FILE_MAX_BYTES = 20 * 1024 * 1024;
+
+  function readFileBase64(file) {
+    return new Promise(function (resolve, reject) {
+      var reader = new FileReader();
+      reader.onload = function () {
+        var s = String(reader.result || "");
+        resolve(s.slice(s.indexOf(",") + 1)); // 去掉 data:...;base64, 前缀
+      };
+      reader.onerror = function () { reject(reader.error || new Error("文件读取失败")); };
+      reader.readAsDataURL(file);
+    });
+  }
+
+  // 成功时 data = { ok, name, path, bytes }，path 即该参数的取值（RPA 容器内路径）
+  async function rpaAssetRequest(appguideId, file) {
+    var base64;
+    try {
+      base64 = await readFileBase64(file);
+    } catch (e) {
+      return { success: false, reason: "read_error", message: e.message || "文件读取失败" };
+    }
+    var r = await bgRequest("rpa-asset", { appguideId: appguideId, name: file.name, base64: base64 });
+    if (!r.success) return { success: false, reason: "transport", message: r.error || "网络错误" };
+    return r.data || { success: false, reason: "transport", message: "空响应" };
+  }
+
+  function isCredParam(p) {
+    return !!p && (p.secret === true || p.storage === "credential");
+  }
+
+  function base64ToBlob(base64, contentType) {
+    var binary = atob(base64);
+    var len = binary.length;
+    var bytes = new Uint8Array(len);
+    for (var i = 0; i < len; i++) bytes[i] = binary.charCodeAt(i);
+    return new Blob([bytes], { type: contentType || "application/octet-stream" });
+  }
+
+  // 只关 DOM；**不停轮询** —— 用户执行完可以关掉弹层去干别的，跑完会弹浮动通知。
+  function closeRpaModal() {
+    if (rpaModalEl && rpaModalEl.parentNode) rpaModalEl.parentNode.removeChild(rpaModalEl);
+    rpaModalEl = null;
+    rpaModalState = null;
+  }
+
+  // 「用时 42s」：优先用运行起止时间，缺了就用步骤耗时之和
+  function runDurationText(run, detail) {
+    var ms = null;
+    if (run && run.started_at && run.finished_at) {
+      var a = new Date(run.started_at).getTime();
+      var b = new Date(run.finished_at).getTime();
+      if (isFinite(a) && isFinite(b) && b >= a) ms = b - a;
+    }
+    if (ms == null && detail) {
+      var steps = Array.isArray(detail.steps) ? detail.steps : [];
+      var sum = steps.reduce(function (n, s) { return n + (Number(s.ms) || 0); }, 0);
+      if (sum > 0) ms = sum;
+    }
+    return ms == null ? "" : "总耗时 " + (ms >= 60000 ? (ms / 60000).toFixed(1) + "min" : Math.round(ms / 1000) + "s");
+  }
+
+  // 把运行状态写回「当前打开的、且正是这次运行所属流程」的弹层
+  function updateRunStatus(text, className) {
+    if (!rpaModalEl || !rpaModalState || !rpaRun) return;
+    if (rpaModalState.flow.id !== rpaRun.flow.id) return; // 别把这次运行的状态写到别的流程的弹层
+    var el = rpaModalEl.querySelector(".rpa-status-text");
+    if (!el) return;
+    el.textContent = text;
+    el.className = className || "rpa-status-text";
+  }
+
+  function removeRpaNotice() {
+    if (rpaNoticeEl && rpaNoticeEl.parentNode) rpaNoticeEl.parentNode.removeChild(rpaNoticeEl);
+    rpaNoticeEl = null;
+  }
+
+  // 弹层已关时，运行结束的浮动通知（点「查看」重新打开弹层看结果）
+  function showRpaNotice(flow, detail) {
+    removeRpaNotice();
+    var run = (detail && detail.run) || {};
+    var passed = run.status === "passed";
+    var steps = detail && Array.isArray(detail.steps) ? detail.steps : [];
+    var dur = runDurationText(run, detail);
+    var meta = [];
+    if (steps.length) meta.push(steps.length + " 步");
+    if (dur) meta.push(dur);
+    var el = document.createElement("div");
+    el.className = "rpa-notice" + (passed ? "" : " rpa-notice-err");
+    el.innerHTML =
+      '<span class="rpa-notice-icon">' + (passed ? "✅" : (run.status === "cancelled" ? "⏹" : "❌")) + '</span>' +
+      '<span class="rpa-notice-text">RPA《' + escapeHtml(flow.title || flow.id) + '》' +
+        (passed ? "执行通过" : (run.status === "cancelled" ? "已取消" : "执行失败")) +
+        (meta.length ? " · " + meta.join(" · ") : "") + '</span>' +
+      '<button type="button" class="rpa-notice-view">查看</button>' +
+      '<button type="button" class="rpa-notice-close" title="关闭">×</button>';
+    document.body.appendChild(el);
+    rpaNoticeEl = el;
+    el.querySelector(".rpa-notice-view").addEventListener("click", function () { openRpaModal(flow); });
+    el.querySelector(".rpa-notice-close").addEventListener("click", removeRpaNotice);
+  }
+
+  async function openRpaModal(flow) {
+    closeRpaModal();
+    removeRpaNotice();
+
+    var mask = document.createElement("div");
+    mask.className = "rpa-modal-mask";
+    mask.innerHTML =
+      '<div class="rpa-modal">' +
+        '<div class="rpa-modal-header">' +
+          '<div class="rpa-modal-title">🤖 <span class="rpa-modal-flow"></span></div>' +
+          '<div class="rpa-modal-header-right">' +
+            '<span class="rpa-stale-badge" style="display:none">脚本已过期</span>' +
+            '<button type="button" class="rpa-modal-close" title="关闭（执行不受影响）">×</button>' +
+          '</div>' +
+        '</div>' +
+        '<div class="rpa-modal-body">' +
+          '<div class="rpa-loading">正在读取流程参数…</div>' +
+          '<div class="rpa-form" style="display:none"></div>' +
+          '<div class="rpa-status-text"></div>' +
+          '<div class="rpa-result" style="display:none"></div>' +
+        '</div>' +
+      '</div>';
+    document.body.appendChild(mask);
+    rpaModalEl = mask;
+    rpaModalState = { mask: mask, flow: flow, spec: null, hasCredential: false };
+    mask.querySelector(".rpa-modal-flow").textContent = flow.title || flow.id;
+    mask.querySelector(".rpa-modal-close").addEventListener("click", closeRpaModal);
+    mask.addEventListener("click", function (e) { if (e.target === mask) closeRpaModal(); });
+    // 「脚本已过期」用列表下发的 rpa.stale 先亮（§5），spec 回来后再以 scriptStale 为准兜底
+    if (flow.rpa && flow.rpa.stale) mask.querySelector(".rpa-stale-badge").style.display = "";
+
+    var spec = await rpaSpecRequest(flow.id);
+    if (rpaModalEl !== mask) return; // 期间被关掉了
+    if (!spec.success || !spec.data) {
+      mask.querySelector(".rpa-loading").textContent = "❌ " + (spec.message || "参数获取失败");
+      return;
+    }
+    renderRpaForm(mask, spec.data);
+
+    // 这个流程有正在跑 / 刚跑完的 run → 接上运行视图（而不是空白表单）
+    if (rpaRun && rpaRun.flow.id === flow.id) attachRunView(mask);
+  }
+
+  // 把（可能已结束的）运行状态接到当前打开的弹层上
+  function attachRunView(mask) {
+    if (!rpaRun) return;
+    var runBtn = mask.querySelector(".rpa-btn-run");
+    if (rpaRun.done) {
+      renderRpaResult(mask, rpaRun.detail);
+      var doneEl = mask.querySelector(".rpa-status-text");
+      if (doneEl) { doneEl.textContent = ""; doneEl.className = "rpa-status-text"; }
+      if (runBtn) runBtn.disabled = false;
+    } else {
+      var el = mask.querySelector(".rpa-status-text");
+      if (el) { el.textContent = "执行中… 状态=" + (rpaRun.status || "queued"); el.className = "rpa-status-text"; }
+      if (runBtn) runBtn.disabled = true;
+    }
+  }
+
+  // 日期参数统一为 YYYY-MM-DD；也认 2026/10/22 / 20261022 / 2026.10.22 等写法。非法返回 null
+  function normalizeYmd(raw) {
+    var m = String(raw || "").trim().match(/^(\d{4})\D?(\d{1,2})\D?(\d{1,2})$/);
+    if (!m) return null;
+    var y = Number(m[1]), mo = Number(m[2]), d = Number(m[3]);
+    var dt = new Date(y, mo - 1, d);
+    if (dt.getFullYear() !== y || dt.getMonth() !== mo - 1 || dt.getDate() !== d) return null;
+    return m[1] + "-" + (mo < 10 ? "0" : "") + mo + "-" + (d < 10 ? "0" : "") + d;
+  }
+
+  function todayYmd() {
+    var n = new Date();
+    return normalizeYmd(n.getFullYear() + "-" + (n.getMonth() + 1) + "-" + n.getDate());
+  }
+
+  function fieldHtml(p) {
+    var key = escapeHtml(p.key);
+    var label = escapeHtml(p.label || p.key);
+    var req = p.required === true ? '<span class="rpa-req">*</span>' : '';
+    var kind = p.kind || "text";
+    var options = Array.isArray(p.options) ? p.options : [];
+    var control;
+    if (kind === "select") {
+      var opts = options.map(function (o) {
+        var ov = escapeHtml(String(o.value));
+        var ol = escapeHtml(String(o.label != null ? o.label : o.value));
+        return '<option value="' + ov + '">' + ol + '</option>';
+      }).join("");
+      control = '<select class="rpa-input" data-key="' + key + '">' + opts + '</select>';
+    } else if ((kind === "radio" || kind === "checkbox") && options.length) {
+      // 单选 / 多选组：值由 collectParams 收集（多选按 RPA 契约 join(",")）。
+      // 组内含多个 <label>，外层不能再用 <label>。非必填单选可再点一次取消（data-clearable）
+      var clearable = kind === "radio" && p.required !== true ? ' data-clearable="1"' : '';
+      var items = options.map(function (o) {
+        var ov = escapeHtml(String(o.value));
+        var ol = escapeHtml(String(o.label != null ? o.label : o.value));
+        return '<label class="rpa-choice"><input type="' + kind + '" name="rpa-param-' + key + '" value="' + ov + '">' + ol + '</label>';
+      }).join("");
+      return '<div class="rpa-field"><span class="rpa-field-label">' + label + req + '</span>' +
+             '<div class="rpa-choice-group" data-key="' + key + '"' + clearable + '>' + items + '</div></div>';
+    } else if (kind === "file") {
+      // 选中即上传到 RPA，拿回的容器内路径写进隐藏的 data-key 输入框，作为该参数的值
+      return '<div class="rpa-field"><span class="rpa-field-label">' + label + req + '</span>' +
+             '<div class="rpa-file">' +
+               '<input type="file" class="rpa-file-picker">' +
+               '<input type="hidden" data-key="' + key + '" value="">' +
+               '<span class="rpa-file-status"></span>' +
+             '</div></div>';
+    } else if (kind === "date") {
+      control = '<input class="rpa-input rpa-date" data-key="' + key + '" type="text" placeholder="YYYY-MM-DD" maxlength="10" autocomplete="off" value="' + todayYmd() + '">';
+    } else if (kind === "textarea") {
+      control = '<textarea class="rpa-input" data-key="' + key + '" rows="2"></textarea>';
+    } else {
+      var type = (kind === "password" || p.secret === true) ? "password" : "text";
+      control = '<input class="rpa-input" data-key="' + key + '" type="' + type + '" autocomplete="off">';
+    }
+    return '<label class="rpa-field"><span class="rpa-field-label">' + label + req + '</span>' + control + '</label>';
+  }
+
+  function renderRpaForm(mask, spec) {
+    var form = mask.querySelector(".rpa-form");
+    mask.querySelector(".rpa-loading").style.display = "none";
+    form.style.display = "";
+    rpaModalState.spec = spec;
+    rpaModalState.hasCredential = spec.hasCredential === true;
+
+    if (spec.synced === false) {
+      form.innerHTML = '<div class="rpa-hint-warn">该流程尚未同步到 RPA，请联系管理员在管理端点「预读流程」。</div>';
+      return;
+    }
+    if (spec.scriptStale === true) mask.querySelector(".rpa-stale-badge").style.display = "";
+
+    var params = Array.isArray(spec.params) ? spec.params : [];
+    var credParams = params.filter(isCredParam);
+    var bizParams = params.filter(function (p) { return !isCredParam(p); });
+
+    var html = "";
+    if (credParams.length) {
+      if (rpaModalState.hasCredential) {
+        html += '<div class="rpa-cred-collapsed">已配置凭据' +
+                (spec.credentialUsername ? '（' + escapeHtml(spec.credentialUsername) + '）' : '') +
+                '，无变更可不填 <button type="button" class="rpa-cred-toggle">更换</button></div>';
+        html += '<div class="rpa-cred-fields" style="display:none">' + credParams.map(fieldHtml).join("") + '</div>';
+      } else {
+        html += credParams.map(fieldHtml).join("");
+      }
+    }
+    html += bizParams.map(fieldHtml).join("");
+    // 执行按钮放在表单末尾（经办人输入框下面）—— 它是「改参数、再执行」的入口，
+    // 不跟结果区混在一起，避免误以为要点它才能看结果。
+    html += '<button type="button" class="rpa-btn-run">执行</button>';
+    form.innerHTML = html;
+
+    var toggle = form.querySelector(".rpa-cred-toggle");
+    if (toggle) {
+      toggle.addEventListener("click", function () {
+        var box = form.querySelector(".rpa-cred-fields");
+        var shown = box.style.display !== "none";
+        box.style.display = shown ? "none" : "";
+        toggle.textContent = shown ? "更换" : "取消更换";
+      });
+    }
+
+    // 日期框失焦时规范成 YYYY-MM-DD；认不出的原样保留，提交时再拦
+    form.querySelectorAll(".rpa-date").forEach(function (el) {
+      el.addEventListener("blur", function () {
+        var v = normalizeYmd(el.value);
+        if (v) el.value = v;
+      });
+    });
+
+    // 非必填单选：再点一次已选中项即取消（原生 radio 选中后无法清空）
+    form.querySelectorAll(".rpa-choice-group[data-clearable]").forEach(function (group) {
+      var last = group.querySelector("input:checked");
+      group.addEventListener("click", function (e) {
+        var el = e.target;
+        if (!el || el.type !== "radio") return;
+        if (el === last) { el.checked = false; last = null; } else { last = el; }
+      });
+    });
+
+    // 文件参数：选中即上传；上传中给容器打 data-uploading，执行时据此拦截
+    var flowId = rpaModalState.flow.id;
+    form.querySelectorAll(".rpa-file").forEach(function (box) {
+      var picker = box.querySelector(".rpa-file-picker");
+      var hidden = box.querySelector("[data-key]");
+      var status = box.querySelector(".rpa-file-status");
+      var setStatus = function (text, isErr) {
+        status.textContent = text;
+        status.className = "rpa-file-status" + (isErr ? " rpa-status-err" : "");
+      };
+      picker.addEventListener("change", async function () {
+        var file = picker.files && picker.files[0];
+        hidden.value = "";
+        box.removeAttribute("data-uploading");
+        if (!file) { setStatus("", false); return; }
+        if (file.size > RPA_FILE_MAX_BYTES) {
+          picker.value = "";
+          setStatus("❌ 文件超过 20MB", true);
+          return;
+        }
+        box.setAttribute("data-uploading", "1");
+        setStatus("上传中…", false);
+        var resp = await rpaAssetRequest(flowId, file);
+        if (!picker.files || picker.files[0] !== file) return; // 期间换了文件，以新的那次为准
+        box.removeAttribute("data-uploading");
+        var path = resp.success && resp.data && resp.data.path;
+        if (!path) {
+          picker.value = "";
+          setStatus("❌ " + (resp.message || "上传失败"), true);
+          return;
+        }
+        hidden.value = path;
+        setStatus("✓ 已上传（" + Math.max(1, Math.round(file.size / 1024)) + " KB）", false);
+      });
+    });
+
+    // 经办人预填（首次输入后记住）
+    var opInput = form.querySelector('[data-key="operator"]');
+    if (opInput) {
+      chrome.storage.local.get(["appguide_rpa_operator"], function (res) {
+        if (opInput && !opInput.value && res && res.appguide_rpa_operator) opInput.value = res.appguide_rpa_operator;
+      });
+    }
+
+    var runBtn = form.querySelector(".rpa-btn-run");
+    runBtn.disabled = false;
+    runBtn.addEventListener("click", function () { executeRpa(mask); });
+    var readyEl = mask.querySelector(".rpa-status-text");
+    readyEl.textContent = "就绪";
+    readyEl.className = "rpa-status-text";
+  }
+
+  function collectParams(scope) {
+    var out = {};
+    scope.querySelectorAll("[data-key]").forEach(function (el) {
+      var key = el.getAttribute("data-key");
+      if (!key) return;
+      if (el.classList.contains("rpa-choice-group")) {
+        var picked = [];
+        el.querySelectorAll("input:checked").forEach(function (i) { picked.push(i.value); });
+        out[key] = picked.join(",");
+      } else {
+        out[key] = el.value;
+      }
+    });
+    return out;
+  }
+
+  async function executeRpa(mask) {
+    var form = mask.querySelector(".rpa-form");
+    var runBtn = mask.querySelector(".rpa-btn-run");
+    var result = mask.querySelector(".rpa-result");
+    var statusEl = mask.querySelector(".rpa-status-text");
+    var st = rpaModalState;
+    if (!st) return;
+    var spec = st.spec || {};
+
+    if (form.querySelector(".rpa-file[data-uploading]")) {
+      statusEl.textContent = "文件上传中，请稍候再执行";
+      statusEl.className = "rpa-status-text rpa-status-err";
+      return;
+    }
+
+    var params = collectParams(form);
+    // 已配置凭据时：隐藏的凭据字段留空 → 不提交，避免用空串覆盖 RPA 侧已存凭据
+    if (st.hasCredential) {
+      (spec.params || []).forEach(function (p) {
+        if (isCredParam(p) && (params[p.key] === undefined || String(params[p.key]).trim() === "")) delete params[p.key];
+      });
+    }
+
+    // 本地必填校验（权威仍是服务端）：隐藏的凭据组不校验
+    var missing = [];
+    (spec.params || []).forEach(function (p) {
+      if (p.required !== true) return;
+      if (isCredParam(p) && st.hasCredential) return;
+      var v = params[p.key];
+      if (v === undefined || v === null || String(v).trim() === "") missing.push(p.label || p.key);
+    });
+    if (missing.length) {
+      statusEl.textContent = "请先填写：" + missing.join("、");
+      statusEl.className = "rpa-status-text rpa-status-err";
+      return;
+    }
+
+    var badDates = [];
+    (spec.params || []).forEach(function (p) {
+      if (p.kind !== "date") return;
+      var v = params[p.key];
+      if (v === undefined || String(v).trim() === "") return;
+      var norm = normalizeYmd(v);
+      if (norm) params[p.key] = norm;
+      else badDates.push(p.label || p.key);
+    });
+    if (badDates.length) {
+      statusEl.textContent = "日期格式应为 YYYY-MM-DD：" + badDates.join("、");
+      statusEl.className = "rpa-status-text rpa-status-err";
+      return;
+    }
+
+    if (params.operator) chrome.storage.local.set({ appguide_rpa_operator: params.operator });
+
+    runBtn.disabled = true;
+    statusEl.textContent = "提交中…";
+    statusEl.className = "rpa-status-text";
+    result.style.display = "none";
+
+    var body = { appguideId: st.flow.id, params: params };
+    if (params.operator) body.requestedBy = params.operator;
+
+    var resp = await rpaRunRequest(body);
+    if (!resp.success) {
+      var msg = resp.message || "执行失败";
+      if (resp.code === "NOT_SYNCED") msg = "该流程尚未同步到 RPA，请联系管理员在管理端点「预读流程」。";
+      if (rpaModalEl === mask) {
+        statusEl.textContent = "❌ " + msg;
+        statusEl.className = "rpa-status-text rpa-status-err";
+        runBtn.disabled = false;
+      } else {
+        showToast("❌ RPA 提交失败：" + msg); // 弹层已关也要告知
+      }
+      return;
+    }
+    var runId = resp.data && resp.data.runId;
+    if (!runId) {
+      if (rpaModalEl === mask) { statusEl.textContent = "❌ 未拿到 runId"; statusEl.className = "rpa-status-text rpa-status-err"; runBtn.disabled = false; }
+      return;
+    }
+
+    // 这次运行独立于弹层存活：关掉弹层轮询继续，跑完弹浮动通知
+    rpaRun = {
+      flow: st.flow,
+      runId: runId,
+      deadline: Date.now() + 15 * 60 * 1000,
+      timer: null,
+      status: "queued",
+      detail: null,
+      done: false,
+    };
+    statusEl.textContent = "已提交（runId=" + runId + "），执行中…（可关掉本窗口，完成后会通知）";
+    pollActiveRun();
+  }
+
+  function pollActiveRun() {
+    if (!rpaRun) return;
+    if (rpaRun.timer) clearTimeout(rpaRun.timer);
+    var tick = async function () {
+      var myRun = rpaRun;
+      if (!myRun) return;
+      if (Date.now() > myRun.deadline) {
+        myRun.timer = null;
+        myRun.done = true;
+        updateRunStatus("⏱ 轮询超时（15 分钟），请稍后到管理端查看结果。");
+        return;
+      }
+      var resp = await rpaStatusRequest(myRun.runId);
+      if (rpaRun !== myRun) return; // 已开始新的一次运行，丢弃旧的
+      if (!resp.success) {
+        updateRunStatus("轮询失败，重试中…（" + (resp.message || "") + "）");
+      } else {
+        var detail = resp.data || {};
+        var st = (detail.run && detail.run.status) || "unknown";
+        myRun.status = st;
+        if (st === "passed" || st === "failed" || st === "cancelled") {
+          myRun.done = true;
+          myRun.detail = detail;
+          myRun.timer = null;
+          onRunTerminal(myRun);
+          return;
+        }
+        updateRunStatus("执行中… 状态=" + st);
+      }
+      myRun.timer = setTimeout(tick, 3000);
+    };
+    tick();
+  }
+
+  function onRunTerminal(myRun) {
+    // 弹层开着且正是这次运行的流程 → 就地出结果；否则弹浮动通知
+    if (rpaModalEl && rpaModalState && rpaModalState.flow.id === myRun.flow.id) {
+      renderRpaResult(rpaModalEl, myRun.detail);
+      // 结果已经由可展开的「执行通过」一行承担，清掉运行中那行状态
+      var statusEl = rpaModalEl.querySelector(".rpa-status-text");
+      if (statusEl) { statusEl.textContent = ""; statusEl.className = "rpa-status-text"; }
+      var b = rpaModalEl.querySelector(".rpa-btn-run");
+      if (b) b.disabled = false;
+    } else {
+      showRpaNotice(myRun.flow, myRun.detail);
+    }
+  }
+
+  function renderRpaResult(mask, detail) {
+    var run = (detail && detail.run) || {};
+    var st = run.status;
+    var passed = st === "passed";
+    var result = mask.querySelector(".rpa-result");
+    if (!result) return;
+
+    var steps = Array.isArray(detail.steps) ? detail.steps : [];
+    var stepsHtml = "";
+    if (steps.length) {
+      stepsHtml = '<div class="rpa-section-title">执行过程</div><div class="rpa-steps">' +
+        steps.map(function (s) {
+          var icon = s.status === "passed" ? "✓" : (s.status === "failed" ? "✕" : "•");
+          var cls = s.status === "passed" ? "ok" : (s.status === "failed" ? "err" : "");
+          var ms = s.ms != null ? ' <span class="rpa-ms">' + Math.round(s.ms) + 'ms</span>' : "";
+          return '<div class="rpa-step ' + cls + '"><span class="rpa-step-icon">' + icon + '</span>' +
+            '<span class="rpa-step-name">' + escapeHtml(s.name || ("步骤 " + s.step_index)) + '</span>' + ms + '</div>' +
+            (s.error ? '<div class="rpa-step-err">' + escapeHtml(String(s.error)) + '</div>' : "");
+        }).join("") + '</div>';
+    }
+
+    // 产物区只留两样：回放录像 + 最后一张截图（优先 验收截图.png / 旧名 SUCCESS-final.png）。
+    // 中间态截图 / 报告 / 日志 / json 不再逐个列出（需要时去管理端下载）。
+    var arts = (Array.isArray(detail.artifacts) ? detail.artifacts : []).filter(function (a) { return a && a.name; });
+    var video = null;
+    for (var vi = 0; vi < arts.length; vi++) {
+      if (arts[vi].kind === "video") { video = arts[vi]; break; }
+    }
+    var shots = arts.filter(function (a) { return a.kind === "screenshot"; });
+    var lastShot = null;
+    for (var si = shots.length - 1; si >= 0; si--) {
+      if (/验收|success/i.test(shots[si].name)) { lastShot = shots[si]; break; }
+    }
+    if (!lastShot && shots.length) lastShot = shots[shots.length - 1];
+
+    var artHtml = "";
+    if (video || lastShot) {
+      artHtml = '<div class="rpa-section-title">产物</div><div class="rpa-artifacts">';
+      if (video) {
+        artHtml += '<button type="button" class="rpa-art-btn" data-art="' + escapeHtml(video.name) + '" data-kind="video">▶ 回放录像</button>';
+      }
+      if (lastShot) {
+        artHtml += '<button type="button" class="rpa-art-btn" data-art="' + escapeHtml(lastShot.name) + '" data-kind="screenshot">🖼 ' + escapeHtml(lastShot.name) + '</button>';
+      }
+      artHtml += '</div><div class="rpa-art-preview"></div>';
+    }
+
+    // 成功：默认只显示一行「执行通过」，点开才看执行过程/产物；
+    // 失败：默认展开（用户要看失败原因）。
+    var expanded = !passed;
+    var dur = runDurationText(run, detail);
+    var meta = [];
+    if (steps.length) meta.push(steps.length + " 步");
+    if (dur) meta.push(dur);
+    result.style.display = "";
+    result.innerHTML =
+      '<button type="button" class="rpa-summary ' + (passed ? "ok" : "err") + '">' +
+        '<span class="rpa-summary-icon">' + (passed ? "✅" : (st === "cancelled" ? "⏹" : "❌")) + '</span>' +
+        '<span class="rpa-summary-text">' + (passed ? "执行通过" : (st === "cancelled" ? "已取消" : "执行失败")) + '</span>' +
+        (meta.length ? '<span class="rpa-summary-meta" title="总耗时含浏览器启动与落库，不等于录像时长">' + meta.join(" · ") + '</span>' : '') +
+        '<span class="rpa-summary-caret">' + (expanded ? "▴" : "▾") + '</span>' +
+      '</button>' +
+      '<div class="rpa-detail"' + (expanded ? "" : ' style="display:none"') + '>' +
+        (run.error ? '<div class="rpa-hint-warn">' + escapeHtml(String(run.error)) + '</div>' : "") +
+        stepsHtml + artHtml +
+      '</div>';
+
+    var summaryBtn = result.querySelector(".rpa-summary");
+    var detailEl = result.querySelector(".rpa-detail");
+    var caret = result.querySelector(".rpa-summary-caret");
+    summaryBtn.addEventListener("click", function () {
+      var open = detailEl.style.display !== "none";
+      detailEl.style.display = open ? "none" : "";
+      caret.textContent = open ? "▾" : "▴";
+    });
+
+    result.querySelectorAll(".rpa-art-btn").forEach(function (btn) {
+      btn.addEventListener("click", function () { openRpaArtifact(mask, btn); });
+    });
+  }
+
+  async function openRpaArtifact(mask, btn) {
+    var name = btn.getAttribute("data-art");
+    var kind = btn.getAttribute("data-kind");
+    var preview = mask.querySelector(".rpa-art-preview");
+    var oldText = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = "加载中…";
+    try {
+      var art = await rpaArtifactRequest(rpaRun ? rpaRun.runId : null, name);
+      var url = URL.createObjectURL(base64ToBlob(art.base64, art.contentType));
+      if (kind === "video") {
+        preview.innerHTML = '<video class="rpa-video" controls src="' + url + '"></video>';
+      } else if (kind === "screenshot") {
+        preview.innerHTML = '<img class="rpa-shot" alt="' + escapeHtml(name) + '" src="' + url + '">';
+      } else {
+        var a = document.createElement("a");
+        a.href = url;
+        a.download = name;
+        document.body.appendChild(a);
+        a.click();
+        setTimeout(function () { if (a.parentNode) a.parentNode.removeChild(a); URL.revokeObjectURL(url); }, 0);
+      }
+    } catch (e) {
+      preview.innerHTML = '<div class="rpa-hint-warn">' + escapeHtml(e.message || "产物下载失败") + '</div>';
+    } finally {
+      btn.disabled = false;
+      btn.textContent = oldText;
     }
   }
 })();

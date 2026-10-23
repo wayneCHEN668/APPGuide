@@ -489,6 +489,9 @@
   text-overflow: ellipsis;
 }
 .gf-notify-approved {
+  /* 列表在渲染前已用 isApprovedFlow 过滤（approval===1），这个「已审核」对勾对每一项都亮 →
+     冗余；且它不可点击、容易和 RPA 机器人图标混在一起，先隐藏。 */
+  display: none !important;
   flex-shrink: 0;
   width: 14px;
   height: 14px;
@@ -514,3 +517,348 @@
   font-size: 11px;
   color: #94a3b8;
 }
+
+/* ------------------ RPA 图标（可用流程列表行内） ------------------ */
+.gf-notify-rpa {
+  flex-shrink: 0;
+  width: 15px;
+  height: 15px;
+  color: #60a5fa;
+  cursor: pointer;
+  border-radius: 3px;
+  transition: color 0.15s, background 0.15s;
+}
+.gf-notify-rpa:hover {
+  color: #fff;
+  background: rgba(96, 165, 250, 0.25);
+}
+
+/* ------------------ RPA 执行弹层 ------------------ */
+.rpa-modal-mask {
+  position: fixed;
+  inset: 0;
+  z-index: 2147483647;
+  background: rgba(2, 6, 23, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: "Microsoft YaHei", "微软雅黑", sans-serif;
+}
+.rpa-modal {
+  width: 560px;
+  max-width: 92vw;
+  max-height: 86vh;
+  display: flex;
+  flex-direction: column;
+  background: rgba(15, 23, 42, 0.98);
+  border: 1px solid rgba(59, 130, 246, 0.4);
+  border-radius: 12px;
+  box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.7);
+  color: #e2e8f0;
+  font-size: 13px;
+  overflow: hidden;
+  animation: rpaModalSlideUp 0.18s cubic-bezier(0.18, 0.89, 0.32, 1.28);
+}
+@keyframes rpaModalSlideUp {
+  from { opacity: 0; transform: translateY(10px) scale(0.97); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+.rpa-modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 12px 16px;
+  background: rgba(30, 41, 59, 0.7);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  user-select: none;
+}
+.rpa-modal-title {
+  font-weight: 700;
+  color: #f1f5f9;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.rpa-modal-header-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+.rpa-stale-badge {
+  font-size: 11px;
+  color: #fbbf24;
+  background: rgba(251, 191, 36, 0.12);
+  border: 1px solid rgba(251, 191, 36, 0.4);
+  border-radius: 4px;
+  padding: 1px 6px;
+}
+.rpa-modal-close {
+  background: none;
+  border: none;
+  color: #94a3b8;
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 2px;
+  font-family: inherit;
+}
+.rpa-modal-close:hover { color: #fff; }
+.rpa-modal-body {
+  padding: 14px 16px;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: #334155 transparent;
+}
+.rpa-loading { color: #94a3b8; padding: 8px 0; }
+.rpa-form { display: flex; flex-direction: column; gap: 10px; }
+.rpa-field { display: flex; flex-direction: column; gap: 4px; }
+.rpa-field-label { font-size: 12px; color: #cbd5e1; }
+.rpa-req { color: #f87171; margin-left: 3px; }
+.rpa-input {
+  width: 100%;
+  box-sizing: border-box;
+  background: #0f172a;
+  border: 1px solid #334155;
+  border-radius: 6px;
+  color: #f1f5f9;
+  padding: 7px 9px;
+  font-size: 13px;
+  font-family: inherit;
+  outline: none;
+}
+.rpa-input:focus { border-color: #3b82f6; }
+.rpa-input::placeholder { color: #64748b; }
+.rpa-choice-group { display: flex; flex-wrap: wrap; gap: 6px 14px; }
+.rpa-choice {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 13px;
+  color: #f1f5f9;
+  cursor: pointer;
+}
+.rpa-choice input { margin: 0; accent-color: #3b82f6; cursor: pointer; }
+.rpa-file { display: flex; flex-direction: column; gap: 4px; }
+.rpa-file-picker { color: #f1f5f9; font-size: 13px; font-family: inherit; }
+.rpa-file-status { font-size: 12px; color: #94a3b8; }
+.rpa-file-status:empty { display: none; }
+.rpa-cred-collapsed {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: #94a3b8;
+  background: rgba(30, 41, 59, 0.5);
+  border: 1px dashed #334155;
+  border-radius: 6px;
+  padding: 7px 10px;
+}
+.rpa-cred-toggle {
+  margin-left: auto;
+  background: none;
+  border: none;
+  color: #60a5fa;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 12px;
+  padding: 0;
+}
+.rpa-cred-toggle:hover { text-decoration: underline; }
+.rpa-cred-fields { display: flex; flex-direction: column; gap: 10px; }
+.rpa-hint-warn {
+  color: #fbbf24;
+  background: rgba(251, 191, 36, 0.08);
+  border: 1px solid rgba(251, 191, 36, 0.3);
+  border-radius: 6px;
+  padding: 8px 10px;
+  font-size: 12px;
+  line-height: 1.5;
+}
+.rpa-modal-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 16px;
+  background: rgba(2, 6, 23, 0.6);
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+.rpa-status-text {
+  font-size: 12px;
+  color: #94a3b8;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.rpa-status-ok { color: #4ade80; }
+.rpa-status-err { color: #f87171; }
+.rpa-btn-run {
+  flex-shrink: 0;
+  padding: 7px 20px;
+  background: #2563eb;
+  color: #fff;
+  border: none;
+  border-radius: 7px;
+  font-size: 13px;
+  font-weight: 600;
+  font-family: inherit;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.rpa-btn-run:hover:not(:disabled) { background: #3b82f6; }
+.rpa-btn-run:disabled { opacity: 0.45; cursor: not-allowed; }
+.rpa-result { margin-top: 14px; display: flex; flex-direction: column; gap: 8px; }
+.rpa-section-title {
+  font-size: 12px;
+  font-weight: 700;
+  color: #94a3b8;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-top: 6px;
+}
+.rpa-steps { display: flex; flex-direction: column; gap: 3px; }
+.rpa-step {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px;
+  border-radius: 5px;
+  background: rgba(30, 41, 59, 0.5);
+  font-size: 12px;
+}
+.rpa-step-icon { width: 12px; text-align: center; color: #64748b; }
+.rpa-step.ok .rpa-step-icon { color: #4ade80; }
+.rpa-step.err .rpa-step-icon { color: #f87171; }
+.rpa-step-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rpa-ms { color: #64748b; font-size: 11px; }
+.rpa-step-err { color: #f87171; font-size: 11px; padding: 2px 8px 4px 28px; }
+.rpa-artifacts { display: flex; flex-wrap: wrap; gap: 6px; }
+.rpa-art-btn {
+  padding: 4px 10px;
+  background: #1e293b;
+  color: #cbd5e1;
+  border: 1px solid #334155;
+  border-radius: 6px;
+  font-size: 12px;
+  font-family: inherit;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.rpa-art-btn:hover:not(:disabled) { background: #334155; color: #fff; }
+.rpa-art-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.rpa-art-preview { margin-top: 4px; }
+.rpa-video {
+  width: 100%;
+  max-height: 340px;
+  border-radius: 8px;
+  background: #000;
+  display: block;
+}
+.rpa-shot {
+  max-width: 100%;
+  border-radius: 8px;
+  border: 1px solid #334155;
+  display: block;
+}
+
+/* 暗色滚动条（弹层） */
+.rpa-modal-body::-webkit-scrollbar { width: 5px; }
+.rpa-modal-body::-webkit-scrollbar-track { background: transparent; }
+.rpa-modal-body::-webkit-scrollbar-thumb { background-color: #334155; border-radius: 10px; }
+.rpa-modal-body::-webkit-scrollbar-thumb:hover { background-color: #475569; }
+
+/* 执行按钮：放在表单末尾（经办人输入框下面），不跟结果区混在一起 */
+.rpa-form .rpa-btn-run {
+  width: 100%;
+  margin-top: 6px;
+}
+.rpa-modal-body .rpa-status-text {
+  margin-top: 8px;
+  white-space: normal;
+}
+.rpa-modal-body .rpa-status-text:empty { display: none; }
+
+/* 结果摘要（默认收起：只显一行「执行通过」） */
+.rpa-summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  box-sizing: border-box;
+  margin-top: 12px;
+  padding: 9px 12px;
+  background: rgba(30, 41, 59, 0.6);
+  border: 1px solid #334155;
+  border-radius: 8px;
+  color: #e2e8f0;
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+.rpa-summary:hover { background: #334155; }
+.rpa-summary.ok { border-color: rgba(74, 222, 128, 0.45); }
+.rpa-summary.err { border-color: rgba(248, 113, 113, 0.5); }
+.rpa-summary-icon { flex-shrink: 0; }
+.rpa-summary-text { flex: 1; text-align: left; }
+.rpa-summary.ok .rpa-summary-text { color: #4ade80; }
+.rpa-summary.err .rpa-summary-text { color: #f87171; }
+.rpa-summary-meta { color: #94a3b8; font-weight: 400; font-size: 12px; cursor: help; }
+.rpa-summary-caret { color: #94a3b8; font-size: 12px; }
+.rpa-detail {
+  margin-top: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+/* 弹层关闭后，运行结束的浮动通知（放右下角，避开右上角的可用流程面板） */
+.rpa-notice {
+  position: fixed;
+  bottom: 16px;
+  right: 16px;
+  z-index: 2147483646;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 340px;
+  padding: 10px 12px;
+  background: rgba(15, 23, 42, 0.97);
+  border: 1px solid rgba(74, 222, 128, 0.5);
+  border-radius: 10px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+  color: #e2e8f0;
+  font-family: "Microsoft YaHei", "微软雅黑", sans-serif;
+  font-size: 13px;
+  animation: rpaModalSlideUp 0.18s cubic-bezier(0.18, 0.89, 0.32, 1.28);
+}
+.rpa-notice-err { border-color: rgba(248, 113, 113, 0.55); }
+.rpa-notice-icon { flex-shrink: 0; }
+.rpa-notice-text { flex: 1; line-height: 1.4; }
+.rpa-notice-view {
+  flex-shrink: 0;
+  background: #2563eb;
+  color: #fff;
+  border: none;
+  border-radius: 6px;
+  padding: 4px 10px;
+  font-size: 12px;
+  font-family: inherit;
+  cursor: pointer;
+}
+.rpa-notice-view:hover { background: #3b82f6; }
+.rpa-notice-close {
+  flex-shrink: 0;
+  background: none;
+  border: none;
+  color: #94a3b8;
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 2px;
+  font-family: inherit;
+}
+.rpa-notice-close:hover { color: #fff; }

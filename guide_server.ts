@@ -3,9 +3,22 @@ import express from "express";
 import * as mysql from "mysql2/promise";
 import fs from "fs";
 import path from "path";
+import { Readable } from "stream";
 
 const app = express();
 const PORT = 3010;
+
+// ============================================================
+// RPA 桥（③）—— 插件只连智导服务端；智导服务端持 API_KEY 代理到
+// guidedatamanager，后者独家持 RPA_INTERNAL_TOKEN。RPA 令牌永不进浏览器。
+//   RPA_BRIDGE_BASE_URL   guidedatamanager 基址（本机 http://127.0.0.1:3333）
+//   RPA_BRIDGE_API_KEY    = guidedatamanager 的 API_KEY（走 X-API-Key）
+//   RPA_BRIDGE_TIMEOUT_MS 代理超时，缺省 30s
+// 二者缺一即视为「桥未配置」，4 个 appguide.rpa.* method 直接 503。
+// ============================================================
+const RPA_BRIDGE_BASE_URL = String(process.env.RPA_BRIDGE_BASE_URL || "").replace(/\/+$/, "");
+const RPA_BRIDGE_API_KEY = String(process.env.RPA_BRIDGE_API_KEY || "");
+const RPA_BRIDGE_TIMEOUT_MS = Number(process.env.RPA_BRIDGE_TIMEOUT_MS || 30000);
 
 // 解析 JSON 请求体
 app.use(express.json());
@@ -38,6 +51,10 @@ interface FlowRecord {
   starturl: string;
   approval: 0 | 1;
   pages: RawPage[];
+  // RPA 能力展示列（appguide 表）——老库/本地 JSON 没有则为 undefined。
+  // 只用于 by-pattern 下发给插件，决定是否渲染 RPA 图标。
+  rpa_ready?: number | boolean;
+  rpa_script_stale?: number | boolean;
 }
 
 // ============================================================
@@ -280,8 +297,12 @@ function resolvePageInFlow(flow: FlowRecord, rawUrl: string): ResolvedPage | nul
 app.use((_req, res, next) => {
   res.header("Access-Control-Allow-Origin", "*");
   res.header("Access-Control-Allow-Headers", "*");
+  res.header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
   next();
 });
+
+// 预检请求直接 204（新增 POST /rest 后，插件后台会先发 OPTIONS）
+app.options("*", (_req, res) => res.sendStatus(204));
 
 // ============================================================
 // GET /api/guide?url=<当前pathname>&flowId=<可选,客户端storage里正在进行的flowId>
@@ -429,6 +450,8 @@ app.get("/api/flows/by-id", async (req, res) => {
         subclass: row.subclass,
         starturl: row.starturl,
         steps: typeof row.steps === "string" ? JSON.parse(row.steps) : row.steps,
+        // 插件把它缓存为 cachedFlow，跨页续接 / 按课件启动都靠它做审核门禁，缺了会被当成未审核
+        approval: toApproval(row.approval),
         updated_date: row.updated_date,
       },
     });
@@ -477,6 +500,8 @@ app.get("/api/flows/by-ocid", async (req, res) => {
         subclass: row.subclass,
         starturl: row.starturl,
         steps: typeof row.steps === "string" ? JSON.parse(row.steps) : row.steps,
+        // 插件把它缓存为 cachedFlow，跨页续接 / 按课件启动都靠它做审核门禁，缺了会被当成未审核
+        approval: toApproval(row.approval),
         updated_date: row.updated_date,
       },
     });
@@ -515,13 +540,16 @@ app.get("/api/flows/by-pattern", async (req, res) => {
       const matched = fileFlows.filter(f => f.starturl.includes(pattern));
       res.json({
         success: true,
-        data: matched.map(f => ({ id: f.id, title: f.title, starturl: f.starturl, approval: f.approval }))
+        data: matched.map(f => ({
+          id: f.id, title: f.title, starturl: f.starturl, approval: f.approval,
+          rpa: { ready: !!f.rpa_ready, stale: !!f.rpa_script_stale },
+        }))
       });
       return;
     }
 
     const [rows] = await pool.query(
-      "SELECT id, title, starturl, steps, approval FROM appguide WHERE starturl LIKE ?",
+      "SELECT id, title, starturl, steps, approval, rpa_ready, rpa_script_stale FROM appguide WHERE starturl LIKE ?",
       [`%${pattern}%`]
     );
     const data = (rows as any[]).map(row => {
@@ -531,6 +559,10 @@ app.get("/api/flows/by-pattern", async (req, res) => {
         title: row.title || (stepsData && stepsData.title) || "",
         starturl: row.starturl,
         approval: toApproval(row.approval),
+        // 插件据此决定是否渲染 RPA 图标：ready = 「verify(write_keep) 真跑通过」；
+        // stale = 「脚本已过期，建议先重生成」（只提示不拦截）。
+        // 老库无这两列时 row.rpa_ready 为 undefined → false，对老插件/老库无害。
+        rpa: { ready: !!row.rpa_ready, stale: !!row.rpa_script_stale },
       };
     });
     res.json({ success: true, data });
@@ -539,6 +571,141 @@ app.get("/api/flows/by-pattern", async (req, res) => {
     res.status(500).json({ success: false, reason: "server_error", message: "服务端查询数据时出错。" });
   }
 });
+
+// ============================================================
+// RPA 桥（③）—— 把 4 个 method 代理到 guidedatamanager。
+//
+//   appguide.rpa.spec      GET  ?appguideId=            -> GET  /api/rpa/param-spec
+//   appguide.rpa.run       POST {appguideId,params,...} -> POST /api/rpa/runs（固定 write_keep）
+//   appguide.rpa.status    GET  ?runId=                 -> GET  /api/rpa/runs/:runId
+//   appguide.rpa.artifact  GET  ?runId=&name=           -> GET  /api/rpa/runs/:runId/artifacts/:name
+//
+// 前三个返回 { success, data } 信封（与 /api/* 一致）；artifact 是二进制
+// （video.webm / 截图 / report），透传字节与 Range，不做 JSON 信封。
+// ============================================================
+
+function rpaBridgeConfigured(): boolean {
+  return Boolean(RPA_BRIDGE_BASE_URL && RPA_BRIDGE_API_KEY);
+}
+
+function sendBridgeUnconfigured(res: any) {
+  res.status(503).json({
+    success: false,
+    reason: "rpa_bridge_unconfigured",
+    message: "RPA 桥未配置（请设置 RPA_BRIDGE_BASE_URL 与 RPA_BRIDGE_API_KEY）。",
+  });
+}
+
+function bridgeBadRequest(res: any, message: string) {
+  res.status(400).json({ success: false, reason: "bad_request", message });
+}
+
+function sendBridgeFailure(res: any, status: number, body: any) {
+  const upstreamMsg = (body && (body.error || body.message)) || `RPA 桥返回 ${status}`;
+  const reason =
+    status === 400 ? "bad_request" :
+    status === 403 ? "forbidden" :
+    status === 404 ? "not_found" :
+    status === 409 ? "not_synced" :
+    "rpa_error";
+  const payload: any = { success: false, reason, message: upstreamMsg };
+  if (body && body.code) payload.code = body.code;
+  res.status(status).json(payload);
+}
+
+async function rpaBridgeJson(pathname: string, init: RequestInit = {}): Promise<{ status: number; body: any }> {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), RPA_BRIDGE_TIMEOUT_MS);
+  try {
+    const upstream = await fetch(`${RPA_BRIDGE_BASE_URL}${pathname}`, {
+      ...init,
+      headers: {
+        "X-API-Key": RPA_BRIDGE_API_KEY,
+        ...(init.body ? { "Content-Type": "application/json" } : {}),
+        ...((init.headers as Record<string, string>) || {}),
+      },
+      signal: ctrl.signal,
+    });
+    const text = await upstream.text();
+    let body: any = null;
+    try { body = text ? JSON.parse(text) : null; } catch { body = { raw: text }; }
+    return { status: upstream.status, body };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** JSON 代理：2xx 包成 {success,data}，其余翻译成 {success:false,reason,message} */
+async function proxyRpaJson(res: any, pathname: string, init: RequestInit = {}) {
+  if (!rpaBridgeConfigured()) return sendBridgeUnconfigured(res);
+  try {
+    const r = await rpaBridgeJson(pathname, init);
+    if (r.status >= 200 && r.status < 300) {
+      res.status(200).json({ success: true, data: r.body });
+    } else {
+      sendBridgeFailure(res, r.status, r.body);
+    }
+  } catch (err) {
+    const msg = /abort|timeout/i.test(String((err as Error)?.message))
+      ? "RPA 桥（guidedatamanager）响应超时。"
+      : `RPA 桥不可达：${(err as Error)?.message}`;
+    res.status(502).json({ success: false, reason: "rpa_bridge_error", message: msg });
+  }
+}
+
+/**
+ * 产物代理：video.webm / 截图 / report。
+ * 录像是十几 MB 的二进制，且 <video> 回放会发 Range —— 必须原样透传字节与
+ * content-range，不能读进内存也不能包 JSON。
+ */
+async function proxyRpaArtifact(req: any, res: any) {
+  if (!rpaBridgeConfigured()) return sendBridgeUnconfigured(res);
+  const runId = Number(req.query.runId);
+  const name = typeof req.query.name === "string" ? req.query.name : "";
+  if (!Number.isFinite(runId) || runId <= 0 || !name) {
+    return bridgeBadRequest(res, "缺少或非法的 runId / name 参数。");
+  }
+
+  const range = typeof req.headers.range === "string" ? req.headers.range : undefined;
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), RPA_BRIDGE_TIMEOUT_MS);
+  let upstream: Response;
+  try {
+    upstream = await fetch(
+      `${RPA_BRIDGE_BASE_URL}/api/rpa/runs/${runId}/artifacts/${encodeURIComponent(name)}`,
+      {
+        headers: { "X-API-Key": RPA_BRIDGE_API_KEY, ...(range ? { Range: range } : {}) },
+        signal: ctrl.signal,
+      }
+    );
+  } catch (err) {
+    return res.status(502).json({
+      success: false,
+      reason: "rpa_bridge_error",
+      message: `RPA 桥不可达：${(err as Error)?.message}`,
+    });
+  } finally {
+    clearTimeout(timer);
+  }
+
+  if (!upstream.ok && upstream.status !== 206) {
+    return res.status(upstream.status === 404 ? 404 : 502).json({
+      success: false,
+      reason: upstream.status === 404 ? "not_found" : "rpa_error",
+      // RPA 会按 RPA_RETENTION_RUNS 清理旧工作区，此时产物 404；元数据仍在库里。
+      message: upstream.status === 404 ? "产物不存在或已被保留策略清理。" : "产物下载失败。",
+    });
+  }
+
+  res.status(upstream.status);
+  for (const h of ["content-type", "content-length", "content-range", "accept-ranges", "last-modified", "etag"]) {
+    const v = upstream.headers.get(h);
+    if (v) res.setHeader(h, v);
+  }
+  if (!upstream.body) return res.end();
+  // 头一拿到就取消超时（上面 finally 已 clear），流式转发不受 30s 限制
+  Readable.fromWeb(upstream.body as any).on("error", () => res.end()).pipe(res);
+}
 
 // ============================================================
 // GET /rest?method=appguide.flows.xxx  — 兼容生产环境统一入口
@@ -552,63 +719,291 @@ app.get("/rest", async (req, res) => {
   if (method === "appguide.flows.guide") {
     // 直接复用 /api/guide 的核心逻辑
     req.url = `/api/guide?url=${req.query.url || ""}&flowId=${req.query.flowId || ""}`;
-    return app.handle(req, res);
+    // app.handle 是 Express 运行时方法，@types/express 未声明 → 断言放行
+    return (app as any).handle(req, res);
   }
 
   if (method === "appguide.flows.bystarturl") {
     req.url = `/api/flows/by-starturl?starturl=${req.query.starturl || ""}`;
-    return app.handle(req, res);
+    return (app as any).handle(req, res);
   }
 
   if (method === "appguide.flows.byid") {
     req.url = `/api/flows/by-id?id=${req.query.id || ""}`;
-    return app.handle(req, res);
+    return (app as any).handle(req, res);
   }
 
   if (method === "appguide.flows.byocid") {
     req.url = `/api/flows/by-ocid?ocid=${req.query.ocid || ""}`;
-    return app.handle(req, res);
+    return (app as any).handle(req, res);
   }
 
   if (method === "appguide.flows.bypattern") {
     req.url = `/api/flows/by-pattern?url=${req.query.url || ""}`;
-    return app.handle(req, res);
+    return (app as any).handle(req, res);
+  }
+
+  // 审核版插件的 track-stats 走 GET /rest?method=appguide.flows.stats&id=..&type=..
+  // （plugin-review/background.js 用 fetch 直接拼 URL，不带 body），与
+  // POST /api/flows/stats 的 JSON body 形态并存，这里转成同一个实现。
+  if (method === "appguide.flows.stats") {
+    const r = await applyFlowStat(req.query.id, req.query.type);
+    return res.status(r.status).json(r.body);
+  }
+
+  // ---- RPA 桥（GET 部分）----
+  if (method === "appguide.rpa.spec") {
+    const appguideId = typeof req.query.appguideId === "string" ? req.query.appguideId : "";
+    if (!appguideId) return bridgeBadRequest(res, "缺少 appguideId 参数。");
+    return proxyRpaJson(res, `/api/rpa/param-spec?appguideId=${encodeURIComponent(appguideId)}`, { method: "GET" });
+  }
+
+  if (method === "appguide.rpa.status") {
+    const runId = Number(req.query.runId);
+    if (!Number.isFinite(runId) || runId <= 0) return bridgeBadRequest(res, "缺少或非法的 runId 参数。");
+    return proxyRpaJson(res, `/api/rpa/runs/${runId}`, { method: "GET" });
+  }
+
+  if (method === "appguide.rpa.artifact") {
+    return proxyRpaArtifact(req, res);
+  }
+
+  res.status(400).json({ success: false, reason: "bad_request", message: `未知的 method: ${method}` });
+});
+
+/**
+ * 统一取 method：query 优先，其次 JSON body。
+ * 审核版插件（GuideManage/plugin-review/background.js）把 method 和参数一起
+ * 塞进 JSON body、不写 query，而该客户端已冻结、不允许改动 —— 两种形态都得认。
+ */
+function resolveRestMethod(req: any): string {
+  if (typeof req.query?.method === "string" && req.query.method) return req.query.method;
+  const body = req.body as any;
+  if (body && typeof body.method === "string" && body.method) return body.method;
+  return "";
+}
+
+// ============================================================
+// POST /rest —— 需要请求体的 method 走这里。
+// 目前有：
+//   appguide.rpa.run            插件动作固定 mode=write_keep（= 管理端「快速运行」，
+//                               只运行不推送），透传 params / requestedBy（经办人，用于运行审计）。
+//   appguide.flows.updatesteps  审核版插件的「审核完成回填」，见 handleUpdateSteps。
+//   appguide.rpa.asset          文件参数上传：body = 原始字节（application/octet-stream），
+//                               appguideId / name 在 query；回 RPA 容器内路径，即该参数的值。
+// 插件 background.js 用 proxyPostRequest 发 JSON body，proxyAssetUpload 发原始字节。
+// ============================================================
+// 路由级 raw 解析：只认 octet-stream，JSON body 仍由全局 express.json() 处理。
+// 上限与插件端 RPA_FILE_MAX_BYTES 一致。
+app.post("/rest", express.raw({ type: "application/octet-stream", limit: "20mb" }), async (req, res) => {
+  const method = resolveRestMethod(req);
+
+  if (method === "appguide.flows.updatesteps") {
+    return handleUpdateSteps(req, res);
+  }
+
+  if (method === "appguide.rpa.asset") {
+    const appguideId = typeof req.query.appguideId === "string" ? req.query.appguideId.trim() : "";
+    const name = typeof req.query.name === "string" ? req.query.name.trim() : "";
+    if (!appguideId || !name) return bridgeBadRequest(res, "缺少 appguideId / name 参数。");
+    if (!Buffer.isBuffer(req.body) || !req.body.length) {
+      return bridgeBadRequest(res, "请求体为空（需要 application/octet-stream 原始字节）。");
+    }
+    return proxyRpaJson(
+      res,
+      `/api/rpa/asset?appguideId=${encodeURIComponent(appguideId)}&name=${encodeURIComponent(name)}`,
+      { method: "POST", body: req.body, headers: { "Content-Type": "application/octet-stream" } }
+    );
+  }
+
+  if (method === "appguide.rpa.run") {
+    if (!rpaBridgeConfigured()) return sendBridgeUnconfigured(res);
+    const body = (req.body || {}) as any;
+    const appguideId = typeof body.appguideId === "string" ? body.appguideId.trim() : "";
+    if (!appguideId) return bridgeBadRequest(res, "缺少 appguideId 参数。");
+
+    const payload: any = {
+      appguideId,
+      // 固定 write_keep —— 不信任调用方传来的 mode
+      mode: "write_keep",
+      params: body.params && typeof body.params === "object" ? body.params : {},
+    };
+    if (typeof body.requestedBy === "string" && body.requestedBy.trim()) {
+      payload.requestedBy = body.requestedBy.trim().slice(0, 64);
+    }
+    if (typeof body.record === "boolean") payload.record = body.record;
+
+    return proxyRpaJson(res, "/api/rpa/runs", { method: "POST", body: JSON.stringify(payload) });
   }
 
   res.status(400).json({ success: false, reason: "bad_request", message: `未知的 method: ${method}` });
 });
 
 // ============================================================
-// POST /api/flows/stats  — 更新流程单击计数
+// 流程单击计数 —— POST /api/flows/stats 与 GET /rest?method=appguide.flows.stats 共用
 // body: { id: string, type: "process" | "step" }
 // type=process → process_count+1（激活流程时）
 // type=step    → steps_count+1   （步骤导航时）
 // ============================================================
 
-app.post("/api/flows/stats", async (req, res) => {
-  try {
-    const { id, type } = req.body;
-    if (!id || !type) {
-      res.status(400).json({ success: false, reason: "bad_request", message: "缺少 id 或 type 参数。" });
-      return;
-    }
-    const column = type === "process" ? "process_count" : type === "step" ? "steps_count" : null;
-    if (!column) {
-      res.status(400).json({ success: false, reason: "bad_request", message: `无效的 type: ${type}` });
-      return;
-    }
-
-    if (SKIP_DB || !pool) {
-      res.json({ success: true });
-      return;
-    }
-
-    await pool.query(`UPDATE appguide SET ${column} = COALESCE(${column}, 0) + 1 WHERE id = ?`, [id]);
-    res.json({ success: true });
-  } catch (err) {
-    console.error("[guide_server] POST /api/flows/stats 出错:", (err as Error).message);
-    res.status(500).json({ success: false, reason: "server_error", message: "更新统计数据时出错。" });
+async function applyFlowStat(idRaw: unknown, typeRaw: unknown): Promise<{ status: number; body: any }> {
+  const id = typeof idRaw === "string" ? idRaw : "";
+  const type = typeof typeRaw === "string" ? typeRaw : "";
+  if (!id || !type) {
+    return { status: 400, body: { success: false, reason: "bad_request", message: "缺少 id 或 type 参数。" } };
   }
+  const column = type === "process" ? "process_count" : type === "step" ? "steps_count" : null;
+  if (!column) {
+    return { status: 400, body: { success: false, reason: "bad_request", message: `无效的 type: ${type}` } };
+  }
+
+  if (SKIP_DB || !pool) {
+    return { status: 200, body: { success: true } };
+  }
+
+  try {
+    await pool.query(`UPDATE appguide SET ${column} = COALESCE(${column}, 0) + 1 WHERE id = ?`, [id]);
+    return { status: 200, body: { success: true } };
+  } catch (err) {
+    console.error("[guide_server] stats 更新出错:", (err as Error).message);
+    return { status: 500, body: { success: false, reason: "server_error", message: "更新统计数据时出错。" } };
+  }
+}
+
+app.post("/api/flows/stats", async (req, res) => {
+  const r = await applyFlowStat(req.body?.id, req.body?.type);
+  res.status(r.status).json(r.body);
+});
+
+// ============================================================
+// POST /api/flows/updatesteps —— 审核回填（审核版插件的唯一写库动作）
+// 同时通过 POST /rest?method=appguide.flows.updatesteps 暴露（见上方 POST /rest）。
+//
+// 调用方：审核版 Chrome 插件 GuideManage/plugin-review
+//   content.js submitFullFlow() 审核收尾 → background.js submit-full-flow
+//   → POST {base}/rest   body: { method, flowId, steps }
+//
+// 入参（JSON body，也兼容 query 传参以便与生产/curl 对齐）：
+//   flowId: string            被审核的流程 id
+//   steps:  string | object   插件会先 JSON.stringify 再发，所以「已序列化的
+//                             JSON 字符串」和「已解析对象」两种形态都要兼容
+//
+// steps 落库规范（以服务端为准，与生产存储一致）：
+//   { title, startUrl, pages: [ { url, title, description,
+//     steps: [ { title, description, highlightStyle, titlePath, fromHtml,
+//     selector, ... } ] } ] }
+//   客户端专有字段（resolvedSelector / controlType / frameSelector / parameters）
+//   原样保留，不做白名单裁剪 —— 多存无害，漏删比误删安全。
+//
+// 副作用：approval **无条件置 1**（= 已审核）。消费端插件（APPGuide/plugin）
+// 的入口门禁只放行 approval === 1 的流程，不置 1 等于审核白做。
+// 已知取舍：插件的「审核尚未完成 → 保存并关闭」走的是同一个 submitFullFlow()，
+// 因此半途保存也会被标记为已审核 —— 这是客户端既定行为，服务端不区分。
+//
+// 只更新 steps 与 approval；starturl / title / class / subclass 列一律不动。
+// ============================================================
+
+/**
+ * 解析插件送来的 steps：兼容 JSON 字符串与已解析对象两种形态。
+ * 只做「能不能用」的最小校验（必须是对象且带 pages 数组），不逐字段校验——
+ * 步骤字段是可扩展的（titlePath / fromHtml / clickText …），服务端不该当白名单。
+ */
+function parseIncomingSteps(raw: unknown): { steps?: any; error?: string } {
+  let steps: any = raw;
+  if (typeof steps === "string") {
+    try {
+      steps = JSON.parse(steps);
+    } catch {
+      return { error: "steps 不是合法的 JSON 字符串。" };
+    }
+  }
+  if (!steps || typeof steps !== "object" || Array.isArray(steps) || !Array.isArray(steps.pages)) {
+    return { error: "steps 非法：必须是带 pages 数组的 JSON 对象。" };
+  }
+  return { steps };
+}
+
+async function handleUpdateSteps(req: any, res: any) {
+  try {
+    const body = (req.body || {}) as any;
+    const flowId = typeof body.flowId === "string" && body.flowId ? body.flowId :
+      (typeof req.query.flowId === "string" ? req.query.flowId : "");
+    const rawSteps = body.steps !== undefined && body.steps !== null && body.steps !== ""
+      ? body.steps
+      : req.query.steps;
+
+    if (!flowId || rawSteps === undefined || rawSteps === null || rawSteps === "") {
+      res.status(400).json({ success: false, reason: "bad_request", message: "缺少 flowId 或 steps 参数。" });
+      return;
+    }
+
+    const parsed = parseIncomingSteps(rawSteps);
+    if (parsed.error) {
+      res.status(400).json({ success: false, reason: "bad_request", message: parsed.error });
+      return;
+    }
+    const stepsData = parsed.steps as { title?: string; startUrl?: string; pages: any[] };
+
+    // ---- 分支A：无数据库模式，直接改写本地 JSON 文件（api/flows/{flowId}.json）----
+    if (SKIP_DB || !pool) {
+      const filePath = path.join(path.resolve("api/flows"), `${flowId}.json`);
+      if (!fs.existsSync(filePath)) {
+        res.status(404).json({ success: false, reason: "not_found", message: `未找到 flowId=${flowId} 的记录。` });
+        return;
+      }
+      const record = JSON.parse(fs.readFileSync(filePath, "utf-8"));
+      // 本地文件是「扁平记录」（id/class/subclass/title/starturl/pages），没有 steps 列，
+      // 所以只覆盖 title / pages，并补上 approval=1；starturl 保持原样。
+      if (typeof stepsData.title === "string" && stepsData.title) record.title = stepsData.title;
+      record.pages = stepsData.pages;
+      record.approval = 1;
+      fs.writeFileSync(filePath, JSON.stringify(record, null, 2), "utf-8");
+      console.log(`[guide_server] 审核回填(文件): flowId=${flowId}, pages=${stepsData.pages.length}, approval=1`);
+      res.json({ success: true, message: `已回填 ${stepsData.pages.length} 页步骤，并标记为已审核。` });
+      return;
+    }
+
+    // ---- 分支B：数据库模式 ----
+    // 先取一次原 steps：既用来判存在（不存在直接 404，不做 upsert），
+    // 也用来兜住客户端漏传的顶层字段（title / startUrl）。
+    const [rows] = await pool.query("SELECT id, steps FROM appguide WHERE id = ?", [flowId]);
+    if ((rows as any[]).length === 0) {
+      res.status(404).json({ success: false, reason: "not_found", message: `未找到 flowId=${flowId} 的记录。` });
+      return;
+    }
+    const row = (rows as any[])[0];
+    let oldSteps: any = {};
+    try {
+      oldSteps = typeof row.steps === "string" ? JSON.parse(row.steps) : (row.steps || {});
+    } catch {
+      oldSteps = {};
+    }
+    const mergedSteps: any = { ...oldSteps, ...stepsData };
+    if (!mergedSteps.title && oldSteps.title) mergedSteps.title = oldSteps.title;
+    if (!mergedSteps.startUrl && oldSteps.startUrl) mergedSteps.startUrl = oldSteps.startUrl;
+
+    const stepsJson = JSON.stringify(mergedSteps);
+    try {
+      await pool.query("UPDATE appguide SET steps = ?, approval = 1 WHERE id = ?", [stepsJson, flowId]);
+    } catch (err) {
+      // 老库可能没有 approval 列 —— 退化成只回填 steps，别把整次审核结果丢掉。
+      if (/approval/i.test(String((err as Error)?.message))) {
+        console.warn("[guide_server] appguide.approval 列不存在，仅回填 steps:", (err as Error).message);
+        await pool.query("UPDATE appguide SET steps = ? WHERE id = ?", [stepsJson, flowId]);
+      } else {
+        throw err;
+      }
+    }
+    console.log(`[guide_server] 审核回填(DB): flowId=${flowId}, pages=${stepsData.pages.length}, approval=1`);
+    res.json({ success: true, message: `已回填 ${stepsData.pages.length} 页步骤，并标记为已审核。` });
+  } catch (err) {
+    console.error("[guide_server] 审核回填出错:", (err as Error).message);
+    res.status(500).json({ success: false, reason: "server_error", message: "服务端回填审核结果时出错。" });
+  }
+}
+
+app.post("/api/flows/updatesteps", async (req, res) => {
+  await handleUpdateSteps(req, res);
 });
 
 app.listen(PORT, () => {
